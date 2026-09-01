@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       source_commit:
-        description: 'Exact commit SHA to test (required, immutable)'
+        description: 'Exact 40-char commit SHA to test (immutable)'
         required: true
         type: string
       profile:
@@ -22,36 +22,48 @@ jobs:
       - name: Checkout pipeline repo
         uses: actions/checkout@v4
 
-      - name: Verify source_commit is a full SHA
+      - name: Validate source_commit format
+        id: validate
         run: |
           SHA="${{ inputs.source_commit }}"
+          # Reject branch names
           if [ "$SHA" = "main" ] || [ "$SHA" = "master" ] || [ "$SHA" = "HEAD" ]; then
             echo "ERROR: source_commit must be an exact SHA, not a branch name"
+            echo "sha_valid=false" >> $GITHUB_OUTPUT
             exit 1
           fi
+          # Must be exactly 40 hex chars
           if [ ${#SHA} -ne 40 ]; then
-            echo "ERROR: source_commit must be a full 40-char SHA, got ${#SHA} chars"
+            echo "ERROR: source_commit must be 40 chars, got ${#SHA}"
+            echo "sha_valid=false" >> $GITHUB_OUTPUT
             exit 1
           fi
-          echo "SOURCE_COMMIT=$SHA" >> $GITHUB_ENV
-          echo "Verified: source_commit is a full SHA"
+          if ! echo "$SHA" | grep -qE '^[0-9a-f]{40}$'; then
+            echo "ERROR: source_commit must be hex, got $SHA"
+            echo "sha_valid=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          echo "sha_valid=true" >> $GITHUB_OUTPUT
+          echo "REQUESTED_SOURCE_COMMIT=$SHA" >> $GITHUB_ENV
+          echo "Validated: source_commit is a 40-char hex SHA"
 
       - name: Checkout metroid source at exact SHA
+        id: checkout
         run: |
-          # Clone the GitLab source repo
-          git clone --depth=1 https://gitlab.com/cheurteen/metroid.git /tmp/metroid || \
-          git clone --depth=1 ${{ secrets.SOURCE_REPO_URL }} /tmp/metroid
+          git clone --depth=1 https://gitlab.com/cheurteen/metroid.git /tmp/metroid
           cd /tmp/metroid
-          # Fetch the exact commit (need full history for that SHA)
-          git fetch --depth=1 origin $SOURCE_COMMIT
-          git checkout $SOURCE_COMMIT
-          # Verify we're at the exact SHA
+          git fetch --depth=1 origin $REQUESTED_SOURCE_COMMIT
+          git checkout $REQUESTED_SOURCE_COMMIT
           ACTUAL=$(git rev-parse HEAD)
-          if [ "$ACTUAL" != "$SOURCE_COMMIT" ]; then
-            echo "ERROR: SHA mismatch! Expected $SOURCE_COMMIT, got $ACTUAL"
+          echo "CHECKED_OUT_SOURCE_COMMIT=$ACTUAL" >> $GITHUB_ENV
+          if [ "$ACTUAL" = "$REQUESTED_SOURCE_COMMIT" ]; then
+            echo "source_sha_match=true" >> $GITHUB_OUTPUT
+            echo "Verified: checkout SHA matches requested SHA"
+          else
+            echo "source_sha_match=false" >> $GITHUB_OUTPUT
+            echo "ERROR: SHA mismatch! Expected $REQUESTED_SOURCE_COMMIT, got $ACTUAL"
             exit 1
           fi
-          echo "Verified: checkout at exact SHA $ACTUAL"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -59,95 +71,174 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
-        run: |
-          pip install capstone
-          echo "Dependencies installed"
+        run: pip install capstone
 
       - name: Create proof directory
         run: mkdir -p proof
 
-      - name: Run smoke tests
-        id: run_tests
+      - name: Run smoke tests with strict accounting
+        id: tests
         run: |
           cd /tmp/metroid
-          PASS=0
-          FAIL=0
-          RESULTS="[]"
           
-          # List of pure Python tests that don't need LLVM
-          for test_file in \
-            switch/scripts/test_experiment_record.py \
-            switch/scripts/test_candidate_schema.py \
-            switch/scripts/test_batch_planner.py \
-            switch/scripts/test_candidate_ranker.py \
-            switch/scripts/test_batch_ledger.py \
-            switch/scripts/test_discovery_replay.py \
-            switch/scripts/test_structural_features.py; do
-            if [ -f "$test_file" ]; then
+          # The EXACT list of expected tests — no more, no less
+          EXPECTED_TESTS=(
+            "switch/scripts/test_experiment_record.py"
+            "switch/scripts/test_candidate_schema.py"
+            "switch/scripts/test_batch_planner.py"
+            "switch/scripts/test_candidate_ranker.py"
+            "switch/scripts/test_batch_ledger.py"
+            "switch/scripts/test_discovery_replay.py"
+            "switch/scripts/test_structural_features.py"
+          )
+          
+          TESTS_EXPECTED=${#EXPECTED_TESTS[@]}
+          TESTS_FOUND=0
+          TESTS_EXECUTED=0
+          TESTS_PASSED=0
+          TESTS_FAILED=0
+          TESTS_MISSING=0
+          
+          # Build test-results.json
+          RESULTS="["
+          FIRST=1
+          
+          for test_file in "${EXPECTED_TESTS[@]}"; do
+            STATUS="UNKNOWN"
+            if [ ! -f "$test_file" ]; then
+              STATUS="MISSING"
+              TESTS_MISSING=$((TESTS_MISSING + 1))
+            else
+              TESTS_FOUND=$((TESTS_FOUND + 1))
+              TESTS_EXECUTED=$((TESTS_EXECUTED + 1))
               echo "--- Running $test_file ---"
               if python "$test_file" >> $GITHUB_WORKSPACE/proof/stdout.txt 2>> $GITHUB_WORKSPACE/proof/stderr.txt; then
-                PASS=$((PASS + 1))
-                RESULTS=$(echo "$RESULTS" | python3 -c "
-          import json,sys
-          d=json.load(sys.stdin)
-          d.append({'test':'$test_file','status':'PASS'})
-          json.dump(d,sys.stdout)
-          ")
-                echo "  PASS"
+                STATUS="PASS"
+                TESTS_PASSED=$((TESTS_PASSED + 1))
               else
-                FAIL=$((FAIL + 1))
-                RESULTS=$(echo "$RESULTS" | python3 -c "
-          import json,sys
-          d=json.load(sys.stdin)
-          d.append({'test':'$test_file','status':'FAIL'})
-          json.dump(d,sys.stdout)
-          ")
-                echo "  FAIL"
+                STATUS="FAIL"
+                TESTS_FAILED=$((TESTS_FAILED + 1))
               fi
-            else
-              echo "--- SKIP $test_file (not found at this commit) ---"
             fi
+            
+            if [ $FIRST -eq 1 ]; then
+              FIRST=0
+            else
+              RESULTS+=","
+            fi
+            RESULTS+="{\"test\":\"$test_file\",\"status\":\"$STATUS\"}"
           done
+          RESULTS+="]"
           
-          echo "PASS=$PASS" >> $GITHUB_ENV
-          echo "FAIL=$FAIL" >> $GITHUB_ENV
           echo "$RESULTS" > $GITHUB_WORKSPACE/proof/test-results.json
           
-          if [ $FAIL -gt 0 ]; then
-            echo "::error::$FAIL tests failed"
+          # Expose metrics
+          echo "TESTS_EXPECTED=$TESTS_EXPECTED" >> $GITHUB_ENV
+          echo "TESTS_FOUND=$TESTS_FOUND" >> $GITHUB_ENV
+          echo "TESTS_EXECUTED=$TESTS_EXECUTED" >> $GITHUB_ENV
+          echo "TESTS_PASSED=$TESTS_PASSED" >> $GITHUB_ENV
+          echo "TESTS_FAILED=$TESTS_FAILED" >> $GITHUB_ENV
+          echo "TESTS_MISSING=$TESTS_MISSING" >> $GITHUB_ENV
+          
+          # Print summary
+          echo "========================================"
+          echo "TESTS EXPECTED   : $TESTS_EXPECTED"
+          echo "TESTS FOUND      : $TESTS_FOUND"
+          echo "TESTS EXECUTED   : $TESTS_EXECUTED"
+          echo "TESTS PASSED     : $TESTS_PASSED"
+          echo "TESTS FAILED     : $TESTS_FAILED"
+          echo "TESTS MISSING    : $TESTS_MISSING"
+          echo "========================================"
+          
+          # HARD FAIL CONDITIONS — no false PASS possible
+          # 1. Any missing test → FAIL
+          if [ $TESTS_MISSING -ne 0 ]; then
+            echo "::error::$TESTS_MISSING tests are MISSING"
             exit 1
           fi
+          # 2. Any failed test → FAIL
+          if [ $TESTS_FAILED -ne 0 ]; then
+            echo "::error::$TESTS_FAILED tests FAILED"
+            exit 1
+          fi
+          # 3. tests_executed != tests_expected → FAIL
+          if [ $TESTS_EXECUTED -ne $TESTS_EXPECTED ]; then
+            echo "::error::tests_executed ($TESTS_EXECUTED) != tests_expected ($TESTS_EXPECTED)"
+            exit 1
+          fi
+          # 4. tests_expected == 0 → FAIL
+          if [ $TESTS_EXPECTED -eq 0 ]; then
+            echo "::error::no tests expected — empty profile"
+            exit 1
+          fi
+          # 5. SHA mismatch already failed in checkout step
 
       - name: Generate run.json
         if: always()
         run: |
           RUNNER_SHA=$(git rev-parse HEAD)
-          SOURCE_SHA=${{ inputs.source_commit }}
+          REQUESTED="${{ env.REQUESTED_SOURCE_COMMIT }}"
+          CHECKED="${{ env.CHECKED_OUT_SOURCE_COMMIT }}"
+          SHA_MATCH="${{ steps.checkout.outputs.source_sha_match }}"
           TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
           OS=$(uname -srm)
           PY_VER=$(python --version 2>&1)
+          
+          # Determine status from actual metrics
+          # FAIL if any of: missing, failed, executed!=expected, sha mismatch
+          STATUS="FAIL"
+          if [ "${{ env.TESTS_MISSING }}" = "0" ] \
+             && [ "${{ env.TESTS_FAILED }}" = "0" ] \
+             && [ "${{ env.TESTS_EXECUTED }}" = "${{ env.TESTS_EXPECTED }}" ] \
+             && [ "$SHA_MATCH" = "true" ] \
+             && [ "${{ env.TESTS_EXPECTED }}" != "0" ]; then
+            STATUS="PASS"
+          fi
           
           cat > proof/run.json << JSON
           {
             "runner_repo": "Cheurteenyt/metroid-pipeline",
             "runner_commit": "$RUNNER_SHA",
             "source_repo": "gitlab.com/cheurteen/metroid",
-            "source_commit": "$SOURCE_SHA",
+            "requested_source_commit": "$REQUESTED",
+            "checked_out_source_commit": "$CHECKED",
+            "source_sha_match": $SHA_MATCH,
             "profile": "${{ inputs.profile }}",
             "runner_os": "$OS",
             "python_version": "$PY_VER",
             "timestamp_utc": "$TIMESTAMP",
-            "status": "$([ ${{ env.FAIL }} -eq 0 ] && echo 'PASS' || echo 'FAIL')",
-            "tests_passed": ${{ env.PASS }},
-            "tests_failed": ${{ env.FAIL }},
+            "status": "$STATUS",
+            "tests_expected": ${{ env.TESTS_EXPECTED }},
+            "tests_found": ${{ env.TESTS_FOUND }},
+            "tests_executed": ${{ env.TESTS_EXECUTED }},
+            "tests_passed": ${{ env.TESTS_PASSED }},
+            "tests_failed": ${{ env.TESTS_FAILED }},
+            "tests_missing": ${{ env.TESTS_MISSING }},
             "commands": [
               "git clone https://gitlab.com/cheurteen/metroid.git",
-              "git checkout $SOURCE_SHA",
+              "git checkout $REQUESTED",
               "python switch/scripts/test_*.py"
             ]
           }
           JSON
+          
           cat proof/run.json
+          
+          echo ""
+          echo "=========================================="
+          echo "SOURCE COMMIT REQUESTED : $REQUESTED"
+          echo "SOURCE COMMIT CHECKED   : $CHECKED"
+          echo "SOURCE SHA MATCH        : $SHA_MATCH"
+          echo ""
+          echo "TESTS EXPECTED          : ${{ env.TESTS_EXPECTED }}"
+          echo "TESTS FOUND             : ${{ env.TESTS_FOUND }}"
+          echo "TESTS EXECUTED          : ${{ env.TESTS_EXECUTED }}"
+          echo "TESTS PASSED            : ${{ env.TESTS_PASSED }}"
+          echo "TESTS FAILED            : ${{ env.TESTS_FAILED }}"
+          echo "TESTS MISSING           : ${{ env.TESTS_MISSING }}"
+          echo ""
+          echo "FINAL STATUS            : $STATUS"
+          echo "=========================================="
 
       - name: Upload proof artifact
         if: always()
@@ -156,3 +247,17 @@ jobs:
           name: proof-${{ inputs.source_commit }}
           path: proof/
           retention-days: 30
+
+      - name: Fail if any test failed
+        if: always()
+        run: |
+          if [ -f proof/run.json ]; then
+            STATUS=$(python3 -c "import json; print(json.load(open('proof/run.json'))['status'])")
+            if [ "$STATUS" != "PASS" ]; then
+              echo "::error::Run status is $STATUS — see proof/run.json for details"
+              exit 1
+            fi
+          else
+            echo "::error::No proof/run.json produced — workflow failed before metrics"
+            exit 1
+          fi
