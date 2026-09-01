@@ -44,10 +44,18 @@ jobs:
       - name: Configure SSH for GitLab
         run: |
           mkdir -p ~/.ssh
-          printf "%s\n" "${{ secrets.GITLAB_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 700 ~/.ssh
+          # The secret GITLAB_SSH_KEY_B64 contains the base64-encoded private key
+          # This avoids newline/formatting issues with GitHub Secrets
+          echo "${{ secrets.GITLAB_SSH_KEY_B64 }}" | base64 -d > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
+          # Verify the key is valid
+          head -1 ~/.ssh/id_ed25519
+          tail -1 ~/.ssh/id_ed25519
+          # Add GitLab to known_hosts
           ssh-keyscan -t ed25519 gitlab.com >> ~/.ssh/known_hosts 2>/dev/null
-          echo "SSH configured for GitLab"
+          # Test SSH
+          ssh -o StrictHostKeyChecking=no -o BatchMode=yes -T git@gitlab.com 2>&1 || true
 
       - name: Detect trigger and parse request
         id: detect
