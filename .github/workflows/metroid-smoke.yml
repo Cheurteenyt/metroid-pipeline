@@ -109,9 +109,9 @@ jobs:
       - name: Checkout metroid at exact SHA
         if: steps.detect.outputs.skip != 'true'
         run: |
-          git clone --depth=1 https://gitlab.com/cheurteen/metroid.git /tmp/metroid
+          git clone https://gitlab.com/cheurteen/metroid.git /tmp/metroid
           cd /tmp/metroid
-          git fetch --depth=1 origin ${{ env.REQUESTED_SOURCE_COMMIT }}
+          git fetch origin ${{ env.REQUESTED_SOURCE_COMMIT }}
           git checkout ${{ env.REQUESTED_SOURCE_COMMIT }}
           ACTUAL=$(git rev-parse HEAD)
           echo "CHECKED_OUT_SOURCE_COMMIT=$ACTUAL" >> $GITHUB_ENV
