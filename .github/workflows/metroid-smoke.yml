@@ -1,0 +1,158 @@
+name: Metroid Smoke Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_commit:
+        description: 'Exact commit SHA to test (required, immutable)'
+        required: true
+        type: string
+      profile:
+        description: 'Test profile'
+        required: true
+        type: choice
+        default: smoke
+        options:
+          - smoke
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout pipeline repo
+        uses: actions/checkout@v4
+
+      - name: Verify source_commit is a full SHA
+        run: |
+          SHA="${{ inputs.source_commit }}"
+          if [ "$SHA" = "main" ] || [ "$SHA" = "master" ] || [ "$SHA" = "HEAD" ]; then
+            echo "ERROR: source_commit must be an exact SHA, not a branch name"
+            exit 1
+          fi
+          if [ ${#SHA} -ne 40 ]; then
+            echo "ERROR: source_commit must be a full 40-char SHA, got ${#SHA} chars"
+            exit 1
+          fi
+          echo "SOURCE_COMMIT=$SHA" >> $GITHUB_ENV
+          echo "Verified: source_commit is a full SHA"
+
+      - name: Checkout metroid source at exact SHA
+        run: |
+          # Clone the GitLab source repo
+          git clone --depth=1 https://gitlab.com/cheurteen/metroid.git /tmp/metroid || \
+          git clone --depth=1 ${{ secrets.SOURCE_REPO_URL }} /tmp/metroid
+          cd /tmp/metroid
+          # Fetch the exact commit (need full history for that SHA)
+          git fetch --depth=1 origin $SOURCE_COMMIT
+          git checkout $SOURCE_COMMIT
+          # Verify we're at the exact SHA
+          ACTUAL=$(git rev-parse HEAD)
+          if [ "$ACTUAL" != "$SOURCE_COMMIT" ]; then
+            echo "ERROR: SHA mismatch! Expected $SOURCE_COMMIT, got $ACTUAL"
+            exit 1
+          fi
+          echo "Verified: checkout at exact SHA $ACTUAL"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install capstone
+          echo "Dependencies installed"
+
+      - name: Create proof directory
+        run: mkdir -p proof
+
+      - name: Run smoke tests
+        id: run_tests
+        run: |
+          cd /tmp/metroid
+          PASS=0
+          FAIL=0
+          RESULTS="[]"
+          
+          # List of pure Python tests that don't need LLVM
+          for test_file in \
+            switch/scripts/test_experiment_record.py \
+            switch/scripts/test_candidate_schema.py \
+            switch/scripts/test_batch_planner.py \
+            switch/scripts/test_candidate_ranker.py \
+            switch/scripts/test_batch_ledger.py \
+            switch/scripts/test_discovery_replay.py \
+            switch/scripts/test_structural_features.py; do
+            if [ -f "$test_file" ]; then
+              echo "--- Running $test_file ---"
+              if python "$test_file" >> $GITHUB_WORKSPACE/proof/stdout.txt 2>> $GITHUB_WORKSPACE/proof/stderr.txt; then
+                PASS=$((PASS + 1))
+                RESULTS=$(echo "$RESULTS" | python3 -c "
+          import json,sys
+          d=json.load(sys.stdin)
+          d.append({'test':'$test_file','status':'PASS'})
+          json.dump(d,sys.stdout)
+          ")
+                echo "  PASS"
+              else
+                FAIL=$((FAIL + 1))
+                RESULTS=$(echo "$RESULTS" | python3 -c "
+          import json,sys
+          d=json.load(sys.stdin)
+          d.append({'test':'$test_file','status':'FAIL'})
+          json.dump(d,sys.stdout)
+          ")
+                echo "  FAIL"
+              fi
+            else
+              echo "--- SKIP $test_file (not found at this commit) ---"
+            fi
+          done
+          
+          echo "PASS=$PASS" >> $GITHUB_ENV
+          echo "FAIL=$FAIL" >> $GITHUB_ENV
+          echo "$RESULTS" > $GITHUB_WORKSPACE/proof/test-results.json
+          
+          if [ $FAIL -gt 0 ]; then
+            echo "::error::$FAIL tests failed"
+            exit 1
+          fi
+
+      - name: Generate run.json
+        if: always()
+        run: |
+          RUNNER_SHA=$(git rev-parse HEAD)
+          SOURCE_SHA=${{ inputs.source_commit }}
+          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          OS=$(uname -srm)
+          PY_VER=$(python --version 2>&1)
+          
+          cat > proof/run.json << JSON
+          {
+            "runner_repo": "Cheurteenyt/metroid-pipeline",
+            "runner_commit": "$RUNNER_SHA",
+            "source_repo": "gitlab.com/cheurteen/metroid",
+            "source_commit": "$SOURCE_SHA",
+            "profile": "${{ inputs.profile }}",
+            "runner_os": "$OS",
+            "python_version": "$PY_VER",
+            "timestamp_utc": "$TIMESTAMP",
+            "status": "$([ ${{ env.FAIL }} -eq 0 ] && echo 'PASS' || echo 'FAIL')",
+            "tests_passed": ${{ env.PASS }},
+            "tests_failed": ${{ env.FAIL }},
+            "commands": [
+              "git clone https://gitlab.com/cheurteen/metroid.git",
+              "git checkout $SOURCE_SHA",
+              "python switch/scripts/test_*.py"
+            ]
+          }
+          JSON
+          cat proof/run.json
+
+      - name: Upload proof artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: proof-${{ inputs.source_commit }}
+          path: proof/
+          retention-days: 30
