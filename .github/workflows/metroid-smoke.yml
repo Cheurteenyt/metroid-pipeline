@@ -41,6 +41,14 @@ jobs:
         with:
           fetch-depth: 2
 
+      - name: Configure SSH for GitLab
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.GITLAB_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -t ed25519 gitlab.com >> ~/.ssh/known_hosts 2>/dev/null
+          echo "SSH configured for GitLab"
+
       - name: Detect trigger and parse request
         id: detect
         run: |
@@ -106,10 +114,10 @@ jobs:
             exit 1
           fi
 
-      - name: Checkout metroid at exact SHA
+      - name: Checkout metroid at exact SHA via SSH
         if: steps.detect.outputs.skip != 'true'
         run: |
-          git clone https://oauth2:${{ secrets.GITLAB_TOKEN }}@gitlab.com/cheurteen/metroid.git /tmp/metroid
+          git clone git@gitlab.com:cheurteen/metroid.git /tmp/metroid
           cd /tmp/metroid
           git fetch origin ${{ env.REQUESTED_SOURCE_COMMIT }}
           git checkout ${{ env.REQUESTED_SOURCE_COMMIT }}
