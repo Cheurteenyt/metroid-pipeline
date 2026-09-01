@@ -125,9 +125,9 @@ jobs:
       - name: Checkout metroid at exact SHA via SSH
         if: steps.detect.outputs.skip != 'true'
         run: |
-          git clone git@gitlab.com:cheurteen/metroid.git /tmp/metroid
+          GIT_SSH_COMMAND="ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no" git clone git@gitlab.com:cheurteen/metroid.git /tmp/metroid
           cd /tmp/metroid
-          git fetch origin ${{ env.REQUESTED_SOURCE_COMMIT }}
+          GIT_SSH_COMMAND="ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no" git fetch origin ${{ env.REQUESTED_SOURCE_COMMIT }}
           git checkout ${{ env.REQUESTED_SOURCE_COMMIT }}
           ACTUAL=$(git rev-parse HEAD)
           echo "CHECKED_OUT_SOURCE_COMMIT=$ACTUAL" >> $GITHUB_ENV
