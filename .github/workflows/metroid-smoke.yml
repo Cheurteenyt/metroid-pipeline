@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       source_commit:
-        description: 'Exact 40-char commit SHA to test (immutable)'
+        description: 'Exact 40-char commit SHA to test'
         required: true
         type: string
       profile:
@@ -41,82 +41,51 @@ jobs:
         with:
           fetch-depth: 2
 
-      - name: Detect trigger mode and extract request
+      - name: Detect trigger and parse request
         id: detect
         run: |
           mkdir -p proof
-          
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            SHA="${{ inputs.source_commit }}"
-            PROFILE="${{ inputs.profile }}"
-            REQUEST_ID="manual-$(date +%s)"
-            echo "Trigger mode: workflow_dispatch"
-            echo "REQUEST_ID=$REQUEST_ID" >> $GITHUB_ENV
-            echo "REQUESTED_SOURCE_COMMIT=$SHA" >> $GITHUB_ENV
-            echo "PROFILE=$PROFILE" >> $GITHUB_ENV
+            echo "REQUEST_ID=manual-$(date +%s)" >> $GITHUB_ENV
+            echo "REQUESTED_SOURCE_COMMIT=${{ inputs.source_commit }}" >> $GITHUB_ENV
+            echo "PROFILE=${{ inputs.profile }}" >> $GITHUB_ENV
             echo "skip=false" >> $GITHUB_OUTPUT
           else
-            echo "Trigger mode: push"
             CHANGED=$(git diff --name-only HEAD~1 HEAD -- 'requests/pending/*.json' 2>/dev/null || true)
-            echo "Changed request files: $CHANGED"
-            
             REQUEST_COUNT=$(echo "$CHANGED" | grep -c '\.json$' || true)
-            
             if [ -z "$CHANGED" ] || [ "$REQUEST_COUNT" -eq 0 ]; then
-              echo "NO_VALID_REQUEST: no request files in this push"
               echo "skip=true" >> $GITHUB_OUTPUT
               exit 0
             fi
-            
             if [ "$REQUEST_COUNT" -gt 1 ]; then
-              echo "::error::Multiple requests ($REQUEST_COUNT) in one push"
-              echo "REQUEST_ID=multi-request-fail" >> $GITHUB_ENV
-              echo "FAIL_REASON=multiple_requests_in_single_push" >> $GITHUB_ENV
+              echo "REQUEST_ID=multi-fail" >> $GITHUB_ENV
+              echo "FAIL_REASON=multiple_requests" >> $GITHUB_ENV
               echo "skip=false" >> $GITHUB_OUTPUT
               exit 1
             fi
-            
             REQUEST_FILE=$(echo "$CHANGED" | head -1)
-            echo "Processing: $REQUEST_FILE"
-            
             if [ ! -f "$REQUEST_FILE" ]; then
-              echo "::error::Request file not found: $REQUEST_FILE"
-              echo "FAIL_REASON=request_file_not_found" >> $GITHUB_ENV
+              echo "FAIL_REASON=file_not_found" >> $GITHUB_ENV
               echo "skip=false" >> $GITHUB_OUTPUT
               exit 1
             fi
-            
-            # Parse with Python for robustness
-            eval "$(python3 -c "
-import json, sys
-d = json.load(open('$REQUEST_FILE'))
-print(f'REQUEST_ID={d.get(\"request_id\",\"\")}')
-print(f'REQUESTED_SOURCE_COMMIT={d.get(\"source_commit\",\"\")}')
-print(f'PROFILE={d.get(\"profile\",\"\")}')
-sr = d.get('source_repo','')
-print(f'SOURCE_REPO={sr}')
-" 2>/dev/null || echo 'REQUEST_ID= REQUESTED_SOURCE_COMMIT= PROFILE=')"
-            
-            # Validate
+            python3 scripts/parse_request.py "$REQUEST_FILE" > /tmp/request_env.sh
+            source /tmp/request_env.sh
+            echo "REQUEST_ID=$REQUEST_ID" >> $GITHUB_ENV
+            echo "REQUESTED_SOURCE_COMMIT=$REQUESTED_SOURCE_COMMIT" >> $GITHUB_ENV
+            echo "PROFILE=$PROFILE" >> $GITHUB_ENV
             if [ -z "$REQUEST_ID" ]; then
-              echo "::error::request_id is empty"
               echo "FAIL_REASON=empty_request_id" >> $GITHUB_ENV
               exit 1
             fi
             if [ "$SOURCE_REPO" != "gitlab.com/cheurteen/metroid" ]; then
-              echo "::error::source_repo must be gitlab.com/cheurteen/metroid"
               echo "FAIL_REASON=invalid_source_repo" >> $GITHUB_ENV
               exit 1
             fi
             if [ "$PROFILE" != "smoke" ]; then
-              echo "::error::profile must be smoke"
               echo "FAIL_REASON=invalid_profile" >> $GITHUB_ENV
               exit 1
             fi
-            
-            echo "REQUEST_ID=$REQUEST_ID" >> $GITHUB_ENV
-            echo "REQUESTED_SOURCE_COMMIT=$REQUESTED_SOURCE_COMMIT" >> $GITHUB_ENV
-            echo "PROFILE=$PROFILE" >> $GITHUB_ENV
             echo "skip=false" >> $GITHUB_OUTPUT
           fi
 
@@ -125,30 +94,20 @@ print(f'SOURCE_REPO={sr}')
         run: |
           SHA="${{ env.REQUESTED_SOURCE_COMMIT }}"
           if [ -z "$SHA" ]; then
-            echo "::error::source_commit is empty"
             echo "FAIL_REASON=empty_source_commit" >> $GITHUB_ENV
             exit 1
           fi
           if [ "$SHA" = "main" ] || [ "$SHA" = "master" ] || [ "$SHA" = "HEAD" ]; then
-            echo "::error::source_commit must be exact SHA, not branch"
-            echo "FAIL_REASON=branch_name_as_source_commit" >> $GITHUB_ENV
+            echo "FAIL_REASON=branch_name" >> $GITHUB_ENV
             exit 1
           fi
-          if [ ${#SHA} -ne 40 ]; then
-            echo "::error::source_commit must be 40 chars, got ${#SHA}"
-            echo "FAIL_REASON=invalid_sha_length" >> $GITHUB_ENV
+          if [ ${#SHA} -ne 40 ] || ! echo "$SHA" | grep -qE '^[0-9a-f]{40}$'; then
+            echo "FAIL_REASON=invalid_sha" >> $GITHUB_ENV
             exit 1
           fi
-          if ! echo "$SHA" | grep -qE '^[0-9a-f]{40}$'; then
-            echo "::error::source_commit must be hex"
-            echo "FAIL_REASON=invalid_sha_format" >> $GITHUB_ENV
-            exit 1
-          fi
-          echo "Validated: source_commit is a 40-char hex SHA"
 
-      - name: Checkout metroid source at exact SHA
+      - name: Checkout metroid at exact SHA
         if: steps.detect.outputs.skip != 'true'
-        id: checkout
         run: |
           git clone --depth=1 https://gitlab.com/cheurteen/metroid.git /tmp/metroid
           cd /tmp/metroid
@@ -158,11 +117,9 @@ print(f'SOURCE_REPO={sr}')
           echo "CHECKED_OUT_SOURCE_COMMIT=$ACTUAL" >> $GITHUB_ENV
           if [ "$ACTUAL" = "${{ env.REQUESTED_SOURCE_COMMIT }}" ]; then
             echo "SOURCE_SHA_MATCH=true" >> $GITHUB_ENV
-            echo "Verified: SHA matches"
           else
             echo "SOURCE_SHA_MATCH=false" >> $GITHUB_ENV
             echo "FAIL_REASON=sha_mismatch" >> $GITHUB_ENV
-            echo "::error::SHA mismatch! Expected ${{ env.REQUESTED_SOURCE_COMMIT }}, got $ACTUAL"
             exit 1
           fi
 
@@ -172,7 +129,7 @@ print(f'SOURCE_REPO={sr}')
         with:
           python-version: '3.12'
 
-      - name: Install dependencies
+      - name: Install capstone
         if: steps.detect.outputs.skip != 'true'
         run: pip install capstone
 
@@ -182,8 +139,7 @@ print(f'SOURCE_REPO={sr}')
           cd /tmp/metroid
           PROOF_DIR="$GITHUB_WORKSPACE/proof/${{ env.REQUEST_ID }}"
           mkdir -p "$PROOF_DIR"
-          
-          EXPECTED_TESTS=(
+          EXPECTED=(
             "switch/scripts/test_experiment_record.py"
             "switch/scripts/test_candidate_schema.py"
             "switch/scripts/test_batch_planner.py"
@@ -192,161 +148,39 @@ print(f'SOURCE_REPO={sr}')
             "switch/scripts/test_discovery_replay.py"
             "switch/scripts/test_structural_features.py"
           )
-          
-          TESTS_EXPECTED=${#EXPECTED_TESTS[@]}
-          TESTS_FOUND=0
-          TESTS_EXECUTED=0
-          TESTS_PASSED=0
-          TESTS_FAILED=0
-          TESTS_MISSING=0
-          RESULTS_FILE="$PROOF_DIR/test-results.json"
-          echo "[" > "$RESULTS_FILE"
+          TE=${#EXPECTED[@]}; TF=0; TX=0; TP=0; TFL=0; TM=0
+          echo "[" > "$PROOF_DIR/test-results.json"
           FIRST=1
-          
-          for test_file in "${EXPECTED_TESTS[@]}"; do
-            STATUS="UNKNOWN"
-            if [ ! -f "$test_file" ]; then
-              STATUS="MISSING"
-              TESTS_MISSING=$((TESTS_MISSING + 1))
+          for t in "${EXPECTED[@]}"; do
+            S="UNKNOWN"
+            if [ ! -f "$t" ]; then
+              S="MISSING"; TM=$((TM+1))
             else
-              TESTS_FOUND=$((TESTS_FOUND + 1))
-              TESTS_EXECUTED=$((TESTS_EXECUTED + 1))
-              echo "--- Running $test_file ---"
-              if python "$test_file" >> "$PROOF_DIR/stdout.txt" 2>> "$PROOF_DIR/stderr.txt"; then
-                STATUS="PASS"
-                TESTS_PASSED=$((TESTS_PASSED + 1))
+              TF=$((TF+1)); TX=$((TX+1))
+              if python "$t" >> "$PROOF_DIR/stdout.txt" 2>> "$PROOF_DIR/stderr.txt"; then
+                S="PASS"; TP=$((TP+1))
               else
-                STATUS="FAIL"
-                TESTS_FAILED=$((TESTS_FAILED + 1))
+                S="FAIL"; TFL=$((TFL+1))
               fi
             fi
-            if [ $FIRST -eq 1 ]; then FIRST=0; else echo "," >> "$RESULTS_FILE"; fi
-            printf '{"test":"%s","status":"%s"}' "$test_file" "$STATUS" >> "$RESULTS_FILE"
+            if [ $FIRST -eq 1 ]; then FIRST=0; else echo "," >> "$PROOF_DIR/test-results.json"; fi
+            printf '{"test":"%s","status":"%s"}' "$t" "$S" >> "$PROOF_DIR/test-results.json"
           done
-          echo "]" >> "$RESULTS_FILE"
-          
-          # Export to GITHUB_ENV
-          echo "TESTS_EXPECTED=$TESTS_EXPECTED" >> $GITHUB_ENV
-          echo "TESTS_FOUND=$TESTS_FOUND" >> $GITHUB_ENV
-          echo "TESTS_EXECUTED=$TESTS_EXECUTED" >> $GITHUB_ENV
-          echo "TESTS_PASSED=$TESTS_PASSED" >> $GITHUB_ENV
-          echo "TESTS_FAILED=$TESTS_FAILED" >> $GITHUB_ENV
-          echo "TESTS_MISSING=$TESTS_MISSING" >> $GITHUB_ENV
-          
-          echo "========================================"
-          echo "TESTS EXPECTED: $TESTS_EXPECTED"
-          echo "TESTS FOUND:    $TESTS_FOUND"
-          echo "TESTS EXECUTED: $TESTS_EXECUTED"
-          echo "TESTS PASSED:   $TESTS_PASSED"
-          echo "TESTS FAILED:   $TESTS_FAILED"
-          echo "TESTS MISSING:  $TESTS_MISSING"
-          echo "========================================"
-          
-          if [ $TESTS_MISSING -ne 0 ]; then
-            echo "FAIL_REASON=tests_missing" >> $GITHUB_ENV
-            exit 1
-          fi
-          if [ $TESTS_FAILED -ne 0 ]; then
-            echo "FAIL_REASON=tests_failed" >> $GITHUB_ENV
-            exit 1
-          fi
-          if [ $TESTS_EXECUTED -ne $TESTS_EXPECTED ]; then
-            echo "FAIL_REASON=executed_ne_expected" >> $GITHUB_ENV
-            exit 1
-          fi
+          echo "]" >> "$PROOF_DIR/test-results.json"
+          echo "TESTS_EXPECTED=$TE" >> $GITHUB_ENV
+          echo "TESTS_FOUND=$TF" >> $GITHUB_ENV
+          echo "TESTS_EXECUTED=$TX" >> $GITHUB_ENV
+          echo "TESTS_PASSED=$TP" >> $GITHUB_ENV
+          echo "TESTS_FAILED=$TFL" >> $GITHUB_ENV
+          echo "TESTS_MISSING=$TM" >> $GITHUB_ENV
+          echo "Expected=$TE Found=$TF Executed=$TX Passed=$TP Failed=$TFL Missing=$TM"
+          if [ $TM -ne 0 ]; then echo "FAIL_REASON=tests_missing" >> $GITHUB_ENV; exit 1; fi
+          if [ $TFL -ne 0 ]; then echo "FAIL_REASON=tests_failed" >> $GITHUB_ENV; exit 1; fi
+          if [ $TX -ne $TE ]; then echo "FAIL_REASON=executed_ne_expected" >> $GITHUB_ENV; exit 1; fi
 
-      - name: Generate run.json (fail-safe, always runs)
+      - name: Generate run.json
         if: always() && steps.detect.outputs.skip != 'true'
-        run: |
-          PROOF_DIR="proof/${{ env.REQUEST_ID }}"
-          # If REQUEST_ID is empty, use a safe fallback
-          if [ -z "$PROOF_DIR" ] || [ "$PROOF_DIR" = "proof/" ]; then
-            PROOF_DIR="proof/failed-${{ github.run_id }}"
-          fi
-          mkdir -p "$PROOF_DIR"
-          
-          # Use Python to generate valid JSON — no heredoc fragility
-          python3 - <<'PY'
-          import json, os
-          
-          def getenv(key, default=""):
-              return os.environ.get(key, default)
-          
-          def getenv_int(key, default=0):
-              try:
-                  return int(os.environ.get(key, str(default)))
-              except (ValueError, TypeError):
-                  return default
-          
-          tests_expected = getenv_int("TESTS_EXPECTED", 0)
-          tests_found = getenv_int("TESTS_FOUND", 0)
-          tests_executed = getenv_int("TESTS_EXECUTED", 0)
-          tests_passed = getenv_int("TESTS_PASSED", 0)
-          tests_failed = getenv_int("TESTS_FAILED", 0)
-          tests_missing = getenv_int("TESTS_MISSING", 0)
-          sha_match = os.environ.get("SOURCE_SHA_MATCH", "false").lower() == "true"
-          
-          # Compute status from real metrics — never hardcode PASS
-          status = "FAIL"
-          if (tests_missing == 0 and tests_failed == 0 
-              and tests_executed == tests_expected and tests_expected > 0 
-              and sha_match):
-              status = "PASS"
-          
-          request_id = getenv("REQUEST_ID")
-          proof_dir = f"proof/{request_id}" if request_id else f"proof/failed-{os.environ.get('GITHUB_RUN_ID','unknown')}"
-          
-          data = {
-              "request_id": request_id,
-              "runner_repo": "Cheurteenyt/metroid-pipeline",
-              "runner_commit": getenv("GITHUB_SHA", ""),
-              "trigger_commit": os.environ.get("GITHUB_SHA", ""),
-              "source_repo": "gitlab.com/cheurteen/metroid",
-              "requested_source_commit": getenv("REQUESTED_SOURCE_COMMIT"),
-              "checked_out_source_commit": getenv("CHECKED_OUT_SOURCE_COMMIT"),
-              "source_sha_match": sha_match,
-              "profile": getenv("PROFILE"),
-              "runner_os": os.uname().__str__() if hasattr(os, 'uname') else "unknown",
-              "python_version": "Python 3.12.x",
-              "timestamp_utc": __import__("datetime").datetime.utcnow().isoformat() + "Z",
-              "status": status,
-              "tests_expected": tests_expected,
-              "tests_found": tests_found,
-              "tests_executed": tests_executed,
-              "tests_passed": tests_passed,
-              "tests_failed": tests_failed,
-              "tests_missing": tests_missing,
-              "fail_reason": getenv("FAIL_REASON", ""),
-              "commands": [
-                  "git clone https://gitlab.com/cheurteen/metroid.git",
-                  "git checkout " + getenv("REQUESTED_SOURCE_COMMIT"),
-                  "python switch/scripts/test_*.py"
-              ]
-          }
-          
-          os.makedirs(proof_dir, exist_ok=True)
-          with open(os.path.join(proof_dir, "run.json"), "w") as f:
-              json.dump(data, f, indent=2)
-              f.write("\n")
-          
-          # Print summary
-          print(json.dumps(data, indent=2))
-          print()
-          print("=" * 50)
-          print(f"REQUEST ID:              {request_id}")
-          print(f"SOURCE COMMIT REQUESTED: {data['requested_source_commit']}")
-          print(f"SOURCE COMMIT CHECKED:   {data['checked_out_source_commit']}")
-          print(f"SOURCE SHA MATCH:        {sha_match}")
-          print(f"TESTS EXPECTED:          {tests_expected}")
-          print(f"TESTS FOUND:             {tests_found}")
-          print(f"TESTS EXECUTED:          {tests_executed}")
-          print(f"TESTS PASSED:            {tests_passed}")
-          print(f"TESTS FAILED:            {tests_failed}")
-          print(f"TESTS MISSING:           {tests_missing}")
-          print(f"FAIL REASON:             {data['fail_reason']}")
-          print(f"FINAL STATUS:            {status}")
-          print("=" * 50)
-          PY
+        run: python3 scripts/generate_run_json.py
 
       - name: Upload proof artifact
         if: always() && steps.detect.outputs.skip != 'true'
@@ -358,37 +192,4 @@ print(f'SOURCE_REPO={sr}')
 
       - name: Final status check
         if: always() && steps.detect.outputs.skip != 'true'
-        run: |
-          python3 - <<'PY'
-          import json, os, sys, glob
-          
-          request_id = os.environ.get("REQUEST_ID", "")
-          if not request_id:
-              request_id = f"failed-{os.environ.get('GITHUB_RUN_ID', 'unknown')}"
-          
-          path = f"proof/{request_id}/run.json"
-          if not os.path.exists(path):
-              # Try glob fallback
-              paths = glob.glob("proof/*/run.json")
-              if not paths:
-                  print(f"::error::No run.json found at {path}")
-                  sys.exit(1)
-              path = paths[0]
-          
-          try:
-              with open(path) as f:
-                  data = json.load(f)
-              status = data.get("status", "FAIL")
-              print(f"run.json status: {status}")
-              if status != "PASS":
-                  reason = data.get("fail_reason", "unknown")
-                  print(f"::error::Run status is {status} (reason: {reason})")
-                  sys.exit(1)
-              print("PASS confirmed from run.json")
-          except json.JSONDecodeError as e:
-              print(f"::error::Invalid JSON in {path}: {e}")
-              sys.exit(1)
-          except Exception as e:
-              print(f"::error::Cannot read {path}: {e}")
-              sys.exit(1)
-          PY
+        run: python3 scripts/check_status.py
