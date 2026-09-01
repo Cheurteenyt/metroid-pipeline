@@ -45,17 +45,17 @@ jobs:
         run: |
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
-          # The secret GITLAB_SSH_KEY_B64 contains the base64-encoded private key
-          # This avoids newline/formatting issues with GitHub Secrets
           echo "${{ secrets.GITLAB_SSH_KEY_B64 }}" | base64 -d > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
-          # Verify the key is valid
-          head -1 ~/.ssh/id_ed25519
-          tail -1 ~/.ssh/id_ed25519
-          # Add GitLab to known_hosts
+          echo "Key first line: $(head -1 ~/.ssh/id_ed25519)"
+          echo "Key last line: $(tail -1 ~/.ssh/id_ed25519)"
+          echo "Key fingerprint:"
+          ssh-keygen -lf ~/.ssh/id_ed25519 2>&1 || echo "ssh-keygen failed"
+          eval $(ssh-agent -s)
+          ssh-add ~/.ssh/id_ed25519 2>&1 || echo "ssh-add failed"
           ssh-keyscan -t ed25519 gitlab.com >> ~/.ssh/known_hosts 2>/dev/null
-          # Test SSH
-          ssh -o StrictHostKeyChecking=no -o BatchMode=yes -T git@gitlab.com 2>&1 || true
+          echo "Testing SSH connection:"
+          ssh -v -o StrictHostKeyChecking=no -o BatchMode=yes -T git@gitlab.com 2>&1 || true
 
       - name: Detect trigger and parse request
         id: detect
