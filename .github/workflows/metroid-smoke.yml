@@ -44,7 +44,7 @@ jobs:
       - name: Configure SSH for GitLab
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.GITLAB_SSH_KEY }}" > ~/.ssh/id_ed25519
+          printf "%s\n" "${{ secrets.GITLAB_SSH_KEY }}" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -t ed25519 gitlab.com >> ~/.ssh/known_hosts 2>/dev/null
           echo "SSH configured for GitLab"
