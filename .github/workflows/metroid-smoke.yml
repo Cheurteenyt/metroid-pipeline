@@ -1,6 +1,10 @@
 name: Metroid Smoke Test
 
 on:
+  push:
+    paths:
+      - 'requests/pending/*.json'
+      - '.github/workflows/metroid-smoke.yml'
   workflow_dispatch:
     inputs:
       source_commit:
@@ -21,67 +25,162 @@ jobs:
     steps:
       - name: Checkout pipeline repo
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Detect trigger mode and extract request
+        id: detect
+        run: |
+          mkdir -p proof
+          
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # Manual trigger — build a synthetic request
+            SHA="${{ inputs.source_commit }}"
+            PROFILE="${{ inputs.profile }}"
+            REQUEST_ID="manual-$(date +%s)"
+            echo "Trigger mode: workflow_dispatch"
+            echo "request_id=$REQUEST_ID" >> $GITHUB_OUTPUT
+            echo "source_commit=$SHA" >> $GITHUB_OUTPUT
+            echo "profile=$PROFILE" >> $GITHUB_OUTPUT
+            echo "source_repo=gitlab.com/cheurteen/metroid" >> $GITHUB_OUTPUT
+            echo "REQUEST_ID=$REQUEST_ID" >> $GITHUB_ENV
+            echo "REQUESTED_SOURCE_COMMIT=$SHA" >> $GITHUB_ENV
+            echo "PROFILE=$PROFILE" >> $GITHUB_ENV
+          else
+            # Push trigger — find request files added/modified in THIS commit
+            echo "Trigger mode: push"
+            
+            # Get files changed in the push commit
+            CHANGED=$(git diff --name-only HEAD~1 HEAD -- 'requests/pending/*.json' 2>/dev/null || true)
+            echo "Changed request files: $CHANGED"
+            
+            REQUEST_COUNT=$(echo "$CHANGED" | grep -c '\.json$' || true)
+            echo "Request count: $REQUEST_COUNT"
+            
+            if [ -z "$CHANGED" ] || [ "$REQUEST_COUNT" -eq 0 ]; then
+              echo "NO_VALID_REQUEST: no request files in this push"
+              echo "REQUEST_ID=NONE" >> $GITHUB_ENV
+              # Not a failure — could be a workflow file change
+              echo "skip=true" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            
+            if [ "$REQUEST_COUNT" -gt 1 ]; then
+              echo "::error::Multiple requests ($REQUEST_COUNT) in one push — not supported in POC"
+              echo "Multiple requests found: $CHANGED"
+              # Create a FAIL proof for this case
+              REQUEST_ID="multi-request-fail"
+              mkdir -p "proof/$REQUEST_ID"
+              cat > "proof/$REQUEST_ID/run.json" << JSON
+              {
+                "request_id": "$REQUEST_ID",
+                "status": "FAIL",
+                "reason": "multiple_requests_in_single_push",
+                "request_count": $REQUEST_COUNT,
+                "changed_files": "$(echo $CHANGED | tr '\n' ' ')"
+              }
+              JSON
+              echo "REQUEST_ID=$REQUEST_ID" >> $GITHUB_ENV
+              echo "skip=false" >> $GITHUB_OUTPUT
+              exit 1
+            fi
+            
+            # Exactly one request — parse it
+            REQUEST_FILE=$(echo "$CHANGED" | head -1)
+            echo "Processing request file: $REQUEST_FILE"
+            
+            if [ ! -f "$REQUEST_FILE" ]; then
+              echo "::error::Request file not found: $REQUEST_FILE"
+              echo "skip=true" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            
+            # Parse JSON request
+            REQUEST_ID=$(python3 -c "import json; d=json.load(open('$REQUEST_FILE')); print(d.get('request_id',''))")
+            SOURCE_REPO=$(python3 -c "import json; d=json.load(open('$REQUEST_FILE')); print(d.get('source_repo',''))")
+            SOURCE_COMMIT=$(python3 -c "import json; d=json.load(open('$REQUEST_FILE')); print(d.get('source_commit',''))")
+            PROFILE=$(python3 -c "import json; d=json.load(open('$REQUEST_FILE')); print(d.get('profile',''))")
+            
+            echo "Request ID: $REQUEST_ID"
+            echo "Source repo: $SOURCE_REPO"
+            echo "Source commit: $SOURCE_COMMIT"
+            echo "Profile: $PROFILE"
+            
+            # Validate request fields
+            if [ -z "$REQUEST_ID" ]; then
+              echo "::error::request_id is empty"
+              exit 1
+            fi
+            if [ "$SOURCE_REPO" != "gitlab.com/cheurteen/metroid" ]; then
+              echo "::error::source_repo must be 'gitlab.com/cheurteen/metroid', got '$SOURCE_REPO'"
+              exit 1
+            fi
+            if [ "$PROFILE" != "smoke" ]; then
+              echo "::error::profile must be 'smoke', got '$PROFILE'"
+              exit 1
+            fi
+            
+            echo "REQUEST_ID=$REQUEST_ID" >> $GITHUB_ENV
+            echo "REQUESTED_SOURCE_COMMIT=$SOURCE_COMMIT" >> $GITHUB_ENV
+            echo "PROFILE=$PROFILE" >> $GITHUB_ENV
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
 
       - name: Validate source_commit format
-        id: validate
+        if: steps.detect.outputs.skip != 'true'
         run: |
-          SHA="${{ inputs.source_commit }}"
-          # Reject branch names
+          SHA="${{ env.REQUESTED_SOURCE_COMMIT }}"
           if [ "$SHA" = "main" ] || [ "$SHA" = "master" ] || [ "$SHA" = "HEAD" ]; then
-            echo "ERROR: source_commit must be an exact SHA, not a branch name"
-            echo "sha_valid=false" >> $GITHUB_OUTPUT
+            echo "::error::source_commit must be exact SHA, not branch name"
             exit 1
           fi
-          # Must be exactly 40 hex chars
           if [ ${#SHA} -ne 40 ]; then
-            echo "ERROR: source_commit must be 40 chars, got ${#SHA}"
-            echo "sha_valid=false" >> $GITHUB_OUTPUT
+            echo "::error::source_commit must be 40 chars, got ${#SHA}"
             exit 1
           fi
           if ! echo "$SHA" | grep -qE '^[0-9a-f]{40}$'; then
-            echo "ERROR: source_commit must be hex, got $SHA"
-            echo "sha_valid=false" >> $GITHUB_OUTPUT
+            echo "::error::source_commit must be hex, got $SHA"
             exit 1
           fi
-          echo "sha_valid=true" >> $GITHUB_OUTPUT
-          echo "REQUESTED_SOURCE_COMMIT=$SHA" >> $GITHUB_ENV
           echo "Validated: source_commit is a 40-char hex SHA"
 
       - name: Checkout metroid source at exact SHA
+        if: steps.detect.outputs.skip != 'true'
         id: checkout
         run: |
           git clone --depth=1 https://gitlab.com/cheurteen/metroid.git /tmp/metroid
           cd /tmp/metroid
-          git fetch --depth=1 origin $REQUESTED_SOURCE_COMMIT
-          git checkout $REQUESTED_SOURCE_COMMIT
+          git fetch --depth=1 origin ${{ env.REQUESTED_SOURCE_COMMIT }}
+          git checkout ${{ env.REQUESTED_SOURCE_COMMIT }}
           ACTUAL=$(git rev-parse HEAD)
           echo "CHECKED_OUT_SOURCE_COMMIT=$ACTUAL" >> $GITHUB_ENV
-          if [ "$ACTUAL" = "$REQUESTED_SOURCE_COMMIT" ]; then
+          if [ "$ACTUAL" = "${{ env.REQUESTED_SOURCE_COMMIT }}" ]; then
             echo "source_sha_match=true" >> $GITHUB_OUTPUT
             echo "Verified: checkout SHA matches requested SHA"
           else
             echo "source_sha_match=false" >> $GITHUB_OUTPUT
-            echo "ERROR: SHA mismatch! Expected $REQUESTED_SOURCE_COMMIT, got $ACTUAL"
+            echo "::error::SHA mismatch! Expected ${{ env.REQUESTED_SOURCE_COMMIT }}, got $ACTUAL"
             exit 1
           fi
 
       - name: Set up Python
+        if: steps.detect.outputs.skip != 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
       - name: Install dependencies
+        if: steps.detect.outputs.skip != 'true'
         run: pip install capstone
 
-      - name: Create proof directory
-        run: mkdir -p proof
-
       - name: Run smoke tests with strict accounting
+        if: steps.detect.outputs.skip != 'true'
         id: tests
         run: |
           cd /tmp/metroid
+          PROOF_DIR="$GITHUB_WORKSPACE/proof/${{ env.REQUESTED_ID }}"
+          mkdir -p "$PROOF_DIR"
           
-          # The EXACT list of expected tests — no more, no less
           EXPECTED_TESTS=(
             "switch/scripts/test_experiment_record.py"
             "switch/scripts/test_candidate_schema.py"
@@ -99,7 +198,6 @@ jobs:
           TESTS_FAILED=0
           TESTS_MISSING=0
           
-          # Build test-results.json
           RESULTS="["
           FIRST=1
           
@@ -112,7 +210,7 @@ jobs:
               TESTS_FOUND=$((TESTS_FOUND + 1))
               TESTS_EXECUTED=$((TESTS_EXECUTED + 1))
               echo "--- Running $test_file ---"
-              if python "$test_file" >> $GITHUB_WORKSPACE/proof/stdout.txt 2>> $GITHUB_WORKSPACE/proof/stderr.txt; then
+              if python "$test_file" >> "$PROOF_DIR/stdout.txt" 2>> "$PROOF_DIR/stderr.txt"; then
                 STATUS="PASS"
                 TESTS_PASSED=$((TESTS_PASSED + 1))
               else
@@ -121,18 +219,13 @@ jobs:
               fi
             fi
             
-            if [ $FIRST -eq 1 ]; then
-              FIRST=0
-            else
-              RESULTS+=","
-            fi
+            if [ $FIRST -eq 1 ]; then FIRST=0; else RESULTS+=","; fi
             RESULTS+="{\"test\":\"$test_file\",\"status\":\"$STATUS\"}"
           done
           RESULTS+="]"
           
-          echo "$RESULTS" > $GITHUB_WORKSPACE/proof/test-results.json
+          echo "$RESULTS" > "$PROOF_DIR/test-results.json"
           
-          # Expose metrics
           echo "TESTS_EXPECTED=$TESTS_EXPECTED" >> $GITHUB_ENV
           echo "TESTS_FOUND=$TESTS_FOUND" >> $GITHUB_ENV
           echo "TESTS_EXECUTED=$TESTS_EXECUTED" >> $GITHUB_ENV
@@ -140,7 +233,6 @@ jobs:
           echo "TESTS_FAILED=$TESTS_FAILED" >> $GITHUB_ENV
           echo "TESTS_MISSING=$TESTS_MISSING" >> $GITHUB_ENV
           
-          # Print summary
           echo "========================================"
           echo "TESTS EXPECTED   : $TESTS_EXPECTED"
           echo "TESTS FOUND      : $TESTS_FOUND"
@@ -150,32 +242,29 @@ jobs:
           echo "TESTS MISSING    : $TESTS_MISSING"
           echo "========================================"
           
-          # HARD FAIL CONDITIONS — no false PASS possible
-          # 1. Any missing test → FAIL
           if [ $TESTS_MISSING -ne 0 ]; then
-            echo "::error::$TESTS_MISSING tests are MISSING"
+            echo "::error::$TESTS_MISSING tests MISSING"
             exit 1
           fi
-          # 2. Any failed test → FAIL
           if [ $TESTS_FAILED -ne 0 ]; then
             echo "::error::$TESTS_FAILED tests FAILED"
             exit 1
           fi
-          # 3. tests_executed != tests_expected → FAIL
           if [ $TESTS_EXECUTED -ne $TESTS_EXPECTED ]; then
-            echo "::error::tests_executed ($TESTS_EXECUTED) != tests_expected ($TESTS_EXPECTED)"
+            echo "::error::executed ($TESTS_EXECUTED) != expected ($TESTS_EXPECTED)"
             exit 1
           fi
-          # 4. tests_expected == 0 → FAIL
           if [ $TESTS_EXPECTED -eq 0 ]; then
-            echo "::error::no tests expected — empty profile"
+            echo "::error::no tests expected"
             exit 1
           fi
-          # 5. SHA mismatch already failed in checkout step
 
       - name: Generate run.json
-        if: always()
+        if: always() && steps.detect.outputs.skip != 'true'
         run: |
+          PROOF_DIR="proof/${{ env.REQUEST_ID }}"
+          mkdir -p "$PROOF_DIR"
+          
           RUNNER_SHA=$(git rev-parse HEAD)
           REQUESTED="${{ env.REQUESTED_SOURCE_COMMIT }}"
           CHECKED="${{ env.CHECKED_OUT_SOURCE_COMMIT }}"
@@ -184,8 +273,6 @@ jobs:
           OS=$(uname -srm)
           PY_VER=$(python --version 2>&1)
           
-          # Determine status from actual metrics
-          # FAIL if any of: missing, failed, executed!=expected, sha mismatch
           STATUS="FAIL"
           if [ "${{ env.TESTS_MISSING }}" = "0" ] \
              && [ "${{ env.TESTS_FAILED }}" = "0" ] \
@@ -195,15 +282,17 @@ jobs:
             STATUS="PASS"
           fi
           
-          cat > proof/run.json << JSON
+          cat > "$PROOF_DIR/run.json" << JSON
           {
+            "request_id": "${{ env.REQUEST_ID }}",
             "runner_repo": "Cheurteenyt/metroid-pipeline",
             "runner_commit": "$RUNNER_SHA",
+            "trigger_commit": "${{ github.sha }}",
             "source_repo": "gitlab.com/cheurteen/metroid",
             "requested_source_commit": "$REQUESTED",
             "checked_out_source_commit": "$CHECKED",
             "source_sha_match": $SHA_MATCH,
-            "profile": "${{ inputs.profile }}",
+            "profile": "${{ env.PROFILE }}",
             "runner_os": "$OS",
             "python_version": "$PY_VER",
             "timestamp_utc": "$TIMESTAMP",
@@ -222,10 +311,11 @@ jobs:
           }
           JSON
           
-          cat proof/run.json
+          cat "$PROOF_DIR/run.json"
           
           echo ""
           echo "=========================================="
+          echo "REQUEST ID              : ${{ env.REQUEST_ID }}"
           echo "SOURCE COMMIT REQUESTED : $REQUESTED"
           echo "SOURCE COMMIT CHECKED   : $CHECKED"
           echo "SOURCE SHA MATCH        : $SHA_MATCH"
@@ -241,23 +331,24 @@ jobs:
           echo "=========================================="
 
       - name: Upload proof artifact
-        if: always()
+        if: always() && steps.detect.outputs.skip != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: proof-${{ inputs.source_commit }}
+          name: proof-${{ env.REQUEST_ID }}
           path: proof/
           retention-days: 30
 
-      - name: Fail if any test failed
-        if: always()
+      - name: Final status check
+        if: always() && steps.detect.outputs.skip != 'true'
         run: |
-          if [ -f proof/run.json ]; then
-            STATUS=$(python3 -c "import json; print(json.load(open('proof/run.json'))['status'])")
+          PROOF_DIR="proof/${{ env.REQUEST_ID }}"
+          if [ -f "$PROOF_DIR/run.json" ]; then
+            STATUS=$(python3 -c "import json; print(json.load(open('$PROOF_DIR/run.json'))['status'])")
             if [ "$STATUS" != "PASS" ]; then
-              echo "::error::Run status is $STATUS — see proof/run.json for details"
+              echo "::error::Run status is $STATUS"
               exit 1
             fi
           else
-            echo "::error::No proof/run.json produced — workflow failed before metrics"
+            echo "::error::No proof/run.json produced"
             exit 1
           fi

@@ -1,15 +1,17 @@
 # Proof Contract
 
-## Artifact: `proof/`
+## Artifact: `proof/<request-id>/`
 
-Every workflow run produces a `proof/` directory containing:
+Every workflow run produces a `proof/<request-id>/` directory containing:
 
 ### `run.json`
 
 ```json
 {
+  "request_id": "smoke-0001",
   "runner_repo": "Cheurteenyt/metroid-pipeline",
   "runner_commit": "<sha>",
+  "trigger_commit": "<github-push-sha>",
   "source_repo": "gitlab.com/cheurteen/metroid",
   "requested_source_commit": "<sha>",
   "checked_out_source_commit": "<sha>",
@@ -31,7 +33,7 @@ Every workflow run produces a `proof/` directory containing:
 
 ### `test-results.json`
 
-Array of `{test, status}` objects for EVERY expected test:
+Array of `{test, status}` for EVERY expected test:
 
 ```json
 [
@@ -41,7 +43,7 @@ Array of `{test, status}` objects for EVERY expected test:
 ]
 ```
 
-A missing test file produces `{"status": "MISSING"}` — never silently skipped.
+Missing test → `{"status": "MISSING"}`. Never silently skipped.
 
 ### `stdout.txt` / `stderr.txt`
 
@@ -52,7 +54,7 @@ Captured output from all test runs.
 | Status | Meaning |
 |--------|---------|
 | `PASS` | All expected tests found, executed, and passed. SHA verified. |
-| `FAIL` | Any test missing, failed, or SHA mismatch. |
+| `FAIL` | Any test missing, failed, SHA mismatch, or validation error. |
 
 ### `PASS` does NOT mean:
 - The decompilation is correct
@@ -81,7 +83,8 @@ The workflow refuses to run if:
 3. `tests_expected == 0` → `FAIL`
 4. SHA mismatch → `FAIL`
 5. `status` is computed from metrics, never hardcoded
-6. `run.json` never contains `EXACT`, `verified`, `semantic`, or `coverage` for smoke
+6. `run.json` never contains `EXACT`, `verified`, `semantic`, or `coverage`
+7. Multiple requests in one push → `FAIL`
 
 ## Invariants
 
@@ -90,3 +93,9 @@ tests_found + tests_missing = tests_expected
 tests_passed + tests_failed = tests_executed
 tests_executed == tests_expected  (required for PASS)
 ```
+
+## Anti-replay (POC limitation)
+
+The runner does NOT delete request files. If the same request is pushed
+again, the workflow runs again. This is acceptable for the POC.
+Production anti-replay will track executed request_ids.
