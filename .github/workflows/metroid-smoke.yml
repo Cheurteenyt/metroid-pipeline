@@ -37,7 +37,8 @@ jobs:
       FAIL_REASON: ""
       CAPSTONE_VERSION: ""
       PYTEST_VERSION: ""
-      GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+      # Token GitLab pour cloner via HTTPS
+      GITLAB_TOKEN: "glpat-faUm2Al5aBYy9rf9kauaQWM6MQpvOjEKdTpvemwycQ8.01.170bxvy9s"
     steps:
       - name: Checkout pipeline repo
         uses: actions/checkout@v4
@@ -131,14 +132,17 @@ jobs:
         if: steps.detect.outputs.skip != 'true'
         run: |
           # Clone via HTTPS with token authentication
+          echo "Cloning with token..."
           git clone "https://oauth2:${{ env.GITLAB_TOKEN }}@gitlab.com/cheurteen/metroid.git" /tmp/metroid
           cd /tmp/metroid
+          echo "Fetching commit ${{ env.REQUESTED_SOURCE_COMMIT }}..."
           git fetch origin ${{ env.REQUESTED_SOURCE_COMMIT }}
           git checkout ${{ env.REQUESTED_SOURCE_COMMIT }}
           ACTUAL=$(git rev-parse HEAD)
           echo "CHECKED_OUT_SOURCE_COMMIT=$ACTUAL" >> $GITHUB_ENV
           if [ "$ACTUAL" = "${{ env.REQUESTED_SOURCE_COMMIT }}" ]; then
             echo "SOURCE_SHA_MATCH=true" >> $GITHUB_ENV
+            echo "✅ Successfully checked out commit"
           else
             echo "SOURCE_SHA_MATCH=false" >> $GITHUB_ENV
             echo "FAIL_REASON=sha_mismatch" >> $GITHUB_ENV
