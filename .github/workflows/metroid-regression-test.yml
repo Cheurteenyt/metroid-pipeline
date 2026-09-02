@@ -1,0 +1,48 @@
+name: Regression Negative Tests (Synthetic)
+
+on:
+  push:
+    paths:
+      - 'scripts/test_regression_negative.py'
+      - 'scripts/regression_compare.py'
+      - 'scripts/check_status.py'
+      - '.github/workflows/metroid-regression-test.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  negative-tests:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest
+      
+      - name: Run negative tests
+        run: |
+          python scripts/test_regression_negative.py
+        continue-on-error: false
+      
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: negative-test-results
+          path: |
+            test-results-*.json
+            *.log
+          retention-days: 30
