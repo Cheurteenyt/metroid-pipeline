@@ -1,0 +1,217 @@
+name: Metroid Regression Gate
+
+on:
+  push:
+    paths:
+      - 'requests/regression/*.json'
+  workflow_dispatch:
+    inputs:
+      baseline_sha:
+        description: 'Baseline SHA (40 chars)'
+        required: true
+      candidate_sha:
+        description: 'Candidate SHA (40 chars)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout pipeline repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Parse request
+        id: parse
+        run: |
+          echo "=== Parsing regression request ==="
+          
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Manual trigger"
+            echo "REQUEST_ID=regression-manual-$(date +%s)" >> $GITHUB_ENV
+            echo "BASELINE_SHA=${{ inputs.baseline_sha }}" >> $GITHUB_ENV
+            echo "CANDIDATE_SHA=${{ inputs.candidate_sha }}" >> $GITHUB_ENV
+          else
+            # Trouver le dernier fichier de requête regression
+            LATEST_FILE=$(git log --diff-filter=A --name-only --pretty=format: -- 'requests/regression/*.json' | grep -v '^$' | head -1)
+            if [ -z "$LATEST_FILE" ]; then
+              echo "No regression request found"
+              exit 1
+            fi
+            
+            echo "Request file: $LATEST_FILE"
+            
+            # Parser le JSON
+            REQUEST_ID=$(jq -r '.request_id' "$LATEST_FILE")
+            BASELINE_SHA=$(jq -r '.baseline_sha' "$LATEST_FILE")
+            CANDIDATE_SHA=$(jq -r '.candidate_sha' "$LATEST_FILE")
+            
+            echo "REQUEST_ID=$REQUEST_ID" >> $GITHUB_ENV
+            echo "BASELINE_SHA=$BASELINE_SHA" >> $GITHUB_ENV
+            echo "CANDIDATE_SHA=$CANDIDATE_SHA" >> $GITHUB_ENV
+            echo "REQUEST_FILE=$LATEST_FILE" >> $GITHUB_ENV
+          fi
+          
+          echo "Parsed:"
+          echo "  Request ID: $REQUEST_ID"
+          echo "  Baseline: $BASELINE_SHA"
+          echo "  Candidate: $CANDIDATE_SHA"
+      
+      - name: Validate SHAs
+        run: |
+          echo "=== Validating SHA format ==="
+          
+          if [ ${#BASELINE_SHA} -ne 40 ] || ! echo "$BASELINE_SHA" | grep -qE '^[0-9a-f]{40}$'; then
+            echo "ERROR: Invalid baseline SHA format"
+            exit 1
+          fi
+          
+          if [ ${#CANDIDATE_SHA} -ne 40 ] || ! echo "$CANDIDATE_SHA" | grep -qE '^[0-9a-f]{40}$'; then
+            echo "ERROR: Invalid candidate SHA format"
+            exit 1
+          fi
+          
+          echo "✓ Both SHAs are valid 40-char hex"
+      
+      - name: Clone baseline from GitLab
+        run: |
+          echo "=== Cloning baseline at $BASELINE_SHA ==="
+          git clone https://oauth2:${{ secrets.GITLAB_TOKEN }}@gitlab.com/cheurteen/metroid.git /tmp/baseline
+          cd /tmp/baseline
+          git checkout $BASELINE_SHA
+          
+          ACTUAL=$(git rev-parse HEAD)
+          echo "BASELINE_ACTUAL=$ACTUAL" >> $GITHUB_ENV
+          
+          if [ "$ACTUAL" != "$BASELINE_SHA" ]; then
+            echo "ERROR: SHA mismatch after checkout"
+            exit 1
+          fi
+          
+          echo "✓ Baseline checked out successfully"
+      
+      - name: Clone candidate from GitLab
+        run: |
+          echo "=== Cloning candidate at $CANDIDATE_SHA ==="
+          git clone https://oauth2:${{ secrets.GITLAB_TOKEN }}@gitlab.com/cheurteen/metroid.git /tmp/candidate
+          cd /tmp/candidate
+          git checkout $CANDIDATE_SHA
+          
+          ACTUAL=$(git rev-parse HEAD)
+          echo "CANDIDATE_ACTUAL=$ACTUAL" >> $GITHUB_ENV
+          
+          if [ "$ACTUAL" != "$CANDIDATE_SHA" ]; then
+            echo "ERROR: SHA mismatch after checkout"
+            exit 1
+          fi
+          
+          echo "✓ Candidate checked out successfully"
+      
+      - name: Run regression comparison
+        id: compare
+        run: |
+          echo "=== Running regression comparison ==="
+          
+          mkdir -p $GITHUB_WORKSPACE/proof
+          cd $GITHUB_WORKSPACE/proof
+          
+          # Vérifier que les manifests existent
+          if [ ! -f "/tmp/baseline/switch/docs/verified_manifest.json" ]; then
+            echo "ERROR: Baseline verified_manifest.json not found"
+            echo "REGRESSION_STATUS=FAIL" >> $GITHUB_ENV
+            echo "REGRESSION_REASON=baseline_manifest_missing" >> $GITHUB_ENV
+            exit 0
+          fi
+          
+          if [ ! -f "/tmp/candidate/switch/docs/verified_manifest.json" ]; then
+            echo "ERROR: Candidate verified_manifest.json not found"
+            echo "REGRESSION_STATUS=FAIL" >> $GITHUB_ENV
+            echo "REGRESSION_REASON=candidate_manifest_missing" >> $GITHUB_ENV
+            exit 0
+          fi
+          
+          # Copier les manifests
+          cp /tmp/baseline/switch/docs/verified_manifest.json baseline_manifest.json
+          cp /tmp/candidate/switch/docs/verified_manifest.json candidate_manifest.json
+          
+          # Compter les fonctions EXACT
+          BASELINE_COUNT=$(jq '.verified | length' baseline_manifest.json)
+          CANDIDATE_COUNT=$(jq '.verified | length' candidate_manifest.json)
+          
+          echo "Baseline EXACT functions: $BASELINE_COUNT"
+          echo "Candidate EXACT functions: $CANDIDATE_COUNT"
+          
+          # Comparer (logique simple : chaque fonction du baseline doit être dans candidate)
+          python3 $GITHUB_WORKSPACE/scripts/regression_compare.py \
+            --baseline baseline_manifest.json \
+            --candidate candidate_manifest.json \
+            --output comparison.json
+          
+          COMPARE_RC=$?
+          
+          if [ $COMPARE_RC -eq 0 ]; then
+            echo "REGRESSION_STATUS=PASS" >> $GITHUB_ENV
+            echo "✓ No regressions detected"
+          else
+            echo "REGRESSION_STATUS=FAIL" >> $GITHUB_ENV
+            echo "REGRESSION_REASON=functions_lost" >> $GITHUB_ENV
+            echo "❌ Regressions detected"
+          fi
+          
+          # Sauvegarder les métriques
+          echo "BASELINE_COUNT=$BASELINE_COUNT" >> $GITHUB_ENV
+          echo "CANDIDATE_COUNT=$CANDIDATE_COUNT" >> $GITHUB_ENV
+      
+      - name: Generate proof
+        run: |
+          echo "=== Generating regression proof ==="
+          cd $GITHUB_WORKSPACE/proof
+          
+          cat > run.json <<EOF
+          {
+            "request_id": "$REQUEST_ID",
+            "profile": "regression",
+            "baseline_sha": "$BASELINE_SHA",
+            "candidate_sha": "$CANDIDATE_SHA",
+            "baseline_actual": "$BASELINE_ACTUAL",
+            "candidate_actual": "$CANDIDATE_ACTUAL",
+            "baseline_exact_count": $BASELINE_COUNT,
+            "candidate_exact_count": $CANDIDATE_COUNT,
+            "status": "$REGRESSION_STATUS",
+            "reason": "${REGRESSION_REASON:-}",
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          EOF
+          
+          echo "Proof generated: run.json"
+          cat run.json
+      
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: proof-${{ env.REQUEST_ID }}
+          path: proof/
+          retention-days: 90
+      
+      - name: Move request to completed
+        if: env.REQUEST_FILE != ''
+        run: |
+          echo "=== Moving request to completed ==="
+          
+          mkdir -p requests/completed/regression
+          
+          if [ -f "$REQUEST_FILE" ]; then
+            mv "$REQUEST_FILE" requests/completed/regression/
+            echo "Moved $REQUEST_FILE to requests/completed/regression/"
+          fi
+          
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add requests/
+          git commit -m "chore: move $REQUEST_ID to completed ($REGRESSION_STATUS)" || echo "No changes"
+          git push || echo "Push failed"
