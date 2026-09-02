@@ -1,0 +1,6 @@
+{
+  "request_id": "regression-0001",
+  "baseline_sha": "43f05d08ef63",
+  "candidate_sha": "43f05d08ef63",
+  "description": "Self-comparison test (baseline == candidate)"
+}
