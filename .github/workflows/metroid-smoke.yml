@@ -69,16 +69,15 @@ jobs:
               COMMITS=$(git rev-list --reverse ${{ github.event.before }}..${{ github.sha }} 2>/dev/null || echo "${{ github.sha }}")
             fi
             
-            CHANGED=""
+            # Utiliser un fichier temporaire au lieu d'une variable pour éviter les problèmes YAML
+            TEMP_FILE="/tmp/changed_files.txt"
+            > "$TEMP_FILE"
+            
             for commit in $COMMITS; do
-              files=$(git diff --name-only ${commit}^ ${commit} -- 'requests/pending/*.json' 2>/dev/null || true)
-              if [ -n "$files" ]; then
-                CHANGED="${CHANGED}${files}
-"
-              fi
+              git diff --name-only ${commit}^ ${commit} -- 'requests/pending/*.json' 2>/dev/null >> "$TEMP_FILE" || true
             done
             
-            CHANGED=$(echo -e "$CHANGED" | sort -u | grep -v '^$' || true)
+            CHANGED=$(sort -u "$TEMP_FILE" | grep -v '^$' || true)
             REQUEST_COUNT=$(echo "$CHANGED" | grep -c '\.json$' || echo "0")
             
             if [ -z "$CHANGED" ] || [ "$REQUEST_COUNT" -eq 0 ]; then
