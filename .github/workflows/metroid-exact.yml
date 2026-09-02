@@ -29,6 +29,7 @@ jobs:
             echo "Manual trigger - using default test"
             echo "REQUEST_ID=exact-test" >> $GITHUB_ENV
             echo "SOURCE_SHA=main" >> $GITHUB_ENV
+            echo "CANDIDATE_PATH=switch/src/CTransform4f.cpp" >> $GITHUB_ENV
           else
             # Trouver le dernier fichier ajouté dans requests/exact/
             LATEST_FILE=$(git log --diff-filter=A --name-only --pretty=format: -- 'requests/exact/*.json' | grep -v '^$' | head -1)
@@ -42,18 +43,18 @@ jobs:
             # Parser le JSON
             REQUEST_ID=$(jq -r '.request_id' "$LATEST_FILE")
             SOURCE_SHA=$(jq -r '.source_sha' "$LATEST_FILE")
-            CANDIDATE=$(jq -r '.candidate' "$LATEST_FILE")
+            CANDIDATE_PATH=$(jq -r '.candidate_path' "$LATEST_FILE")
             
             echo "REQUEST_ID=$REQUEST_ID" >> $GITHUB_ENV
             echo "SOURCE_SHA=$SOURCE_SHA" >> $GITHUB_ENV
-            echo "CANDIDATE=$CANDIDATE" >> $GITHUB_ENV
+            echo "CANDIDATE_PATH=$CANDIDATE_PATH" >> $GITHUB_ENV
             echo "REQUEST_FILE=$LATEST_FILE" >> $GITHUB_ENV
           fi
           
           echo "Parsed:"
           echo "  Request ID: $REQUEST_ID"
           echo "  Source SHA: $SOURCE_SHA"
-          echo "  Candidate: $CANDIDATE"
+          echo "  Candidate Path: $CANDIDATE_PATH"
       
       - name: Checkout GitLab repo
         run: |
@@ -95,19 +96,21 @@ jobs:
       - name: Compile candidate
         id: compile
         run: |
-          echo "=== Compiling candidate: $CANDIDATE ==="
+          echo "=== Compiling candidate: $CANDIDATE_PATH ==="
           cd /tmp/metroid
           
           # Créer le répertoire de preuve
           mkdir -p $GITHUB_WORKSPACE/proof
           cd $GITHUB_WORKSPACE/proof
           
-          # Copier les fichiers du candidat
-          if [ ! -f "/tmp/metroid/switch/scripts/$CANDIDATE" ]; then
-            echo "❌ Candidate file not found: $CANDIDATE"
+          # Vérifier que le fichier existe
+          if [ ! -f "/tmp/metroid/$CANDIDATE_PATH" ]; then
+            echo "❌ Candidate file not found: $CANDIDATE_PATH"
             echo "COMPILE_SUCCESS=false" >> $GITHUB_ENV
             exit 1
           fi
+          
+          echo "✅ Candidate file found: $CANDIDATE_PATH"
           
           # Compiler avec les flags AArch64
           echo "Compiling with AArch64 toolchain..."
@@ -122,7 +125,8 @@ jobs:
             -std=c++17 \
             -w \
             -I /tmp/metroid/switch/include \
-            /tmp/metroid/switch/scripts/$CANDIDATE \
+            -I /tmp/metroid/switch/src \
+            /tmp/metroid/$CANDIDATE_PATH \
             -o candidate.o 2> compile_errors.txt
           
           if [ $? -eq 0 ]; then
@@ -132,8 +136,8 @@ jobs:
             
             # Analyser l'objet compilé
             echo "Analyzing compiled object..."
-            llvm-nm-17 candidate.o > symbols.txt
-            llvm-objdump-17 -d candidate.o > disassembly.txt
+            llvm-nm-17 candidate.o > symbols.txt 2>&1
+            llvm-objdump-17 -d candidate.o > disassembly.txt 2>&1
             
             echo "Generated:"
             echo "  - candidate.o"
@@ -181,7 +185,7 @@ jobs:
           {
             "request_id": "$REQUEST_ID",
             "source_sha": "$SOURCE_SHA",
-            "candidate": "$CANDIDATE",
+            "candidate_path": "$CANDIDATE_PATH",
             "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
             "compile_status": "$COMPILE_STATUS",
             "compile_success": $COMPILE_SUCCESS,
