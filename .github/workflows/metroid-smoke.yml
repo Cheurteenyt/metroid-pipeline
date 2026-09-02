@@ -4,71 +4,40 @@ on:
   push:
     paths:
       - 'requests/pending/*.json'
-      - '.github/workflows/metroid-smoke.yml'
   workflow_dispatch:
     inputs:
       source_commit:
         description: 'Exact 40-char commit SHA to test'
         required: true
         type: string
-      profile:
-        description: 'Test profile'
-        required: true
-        type: choice
-        default: smoke
-        options:
-          - smoke
+
+permissions:
+  contents: write
 
 jobs:
   smoke:
     runs-on: ubuntu-latest
-    env:
-      REQUEST_ID: ""
-      REQUESTED_SOURCE_COMMIT: ""
-      CHECKED_OUT_SOURCE_COMMIT: ""
-      SOURCE_SHA_MATCH: "false"
-      PROFILE: ""
-      TESTS_EXPECTED: "0"
-      TESTS_FOUND: "0"
-      TESTS_EXECUTED: "0"
-      TESTS_PASSED: "0"
-      TESTS_FAILED: "0"
-      TESTS_MISSING: "0"
-      FAIL_REASON: ""
-      CAPSTONE_VERSION: ""
-      PYTEST_VERSION: ""
-      # Token GitLab pour cloner via HTTPS
-      GITLAB_TOKEN: "glpat-faUm2Al5aBYy9rf9kauaQWM6MQpvOjEKdTpvemwycQ8.01.170bxvy9s"
+    
     steps:
       - name: Checkout pipeline repo
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
 
-      - name: Detect trigger and parse request
+      - name: Detect request from push
         id: detect
         run: |
           mkdir -p proof
+          
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "REQUEST_ID=manual-$(date +%s)" >> $GITHUB_ENV
             echo "REQUESTED_SOURCE_COMMIT=${{ inputs.source_commit }}" >> $GITHUB_ENV
-            echo "PROFILE=${{ inputs.profile }}" >> $GITHUB_ENV
+            echo "PROFILE=smoke" >> $GITHUB_ENV
+            echo "REQUEST_FILE=" >> $GITHUB_ENV
             echo "skip=false" >> $GITHUB_OUTPUT
           else
-            if [ "${{ github.event.before }}" = "0000000000000000000000000000000000000000" ]; then
-              COMMITS="${{ github.sha }}"
-            else
-              COMMITS=$(git rev-list --reverse ${{ github.event.before }}..${{ github.sha }} 2>/dev/null || echo "${{ github.sha }}")
-            fi
-            
-            TEMP_FILE="/tmp/changed_files.txt"
-            > "$TEMP_FILE"
-            
-            for commit in $COMMITS; do
-              git diff --name-only ${commit}^ ${commit} -- 'requests/pending/*.json' 2>/dev/null >> "$TEMP_FILE" || true
-            done
-            
-            CHANGED=$(sort -u "$TEMP_FILE" | grep -v '^$' || true)
+            # Trouver les fichiers de requêtes ajoutés ou modifiés dans ce push
+            CHANGED=$(git diff --name-only --diff-filter=ACMR ${{ github.event.before }}..${{ github.sha }} -- 'requests/pending/*.json' 2>/dev/null || true)
             REQUEST_COUNT=$(echo "$CHANGED" | grep -c '\.json$' || echo "0")
             
             if [ -z "$CHANGED" ] || [ "$REQUEST_COUNT" -eq 0 ]; then
@@ -79,19 +48,24 @@ jobs:
             if [ "$REQUEST_COUNT" -gt 1 ]; then
               echo "REQUEST_ID=multi-fail" >> $GITHUB_ENV
               echo "FAIL_REASON=multiple_requests" >> $GITHUB_ENV
+              echo "REQUEST_FILE=" >> $GITHUB_ENV
               echo "skip=false" >> $GITHUB_OUTPUT
               exit 1
             fi
             
             REQUEST_FILE=$(echo "$CHANGED" | head -1)
+            echo "REQUEST_FILE=$REQUEST_FILE" >> $GITHUB_ENV
+            
             if [ ! -f "$REQUEST_FILE" ]; then
               echo "FAIL_REASON=file_not_found" >> $GITHUB_ENV
+              echo "REQUEST_ID=unknown" >> $GITHUB_ENV
               echo "skip=false" >> $GITHUB_OUTPUT
               exit 1
             fi
             
             python3 scripts/parse_request.py "$REQUEST_FILE" > /tmp/request_env.sh
             source /tmp/request_env.sh
+            
             echo "REQUEST_ID=$REQUEST_ID" >> $GITHUB_ENV
             echo "REQUESTED_SOURCE_COMMIT=$REQUESTED_SOURCE_COMMIT" >> $GITHUB_ENV
             echo "PROFILE=$PROFILE" >> $GITHUB_ENV
@@ -108,6 +82,7 @@ jobs:
               echo "FAIL_REASON=invalid_profile" >> $GITHUB_ENV
               exit 1
             fi
+            
             echo "skip=false" >> $GITHUB_OUTPUT
           fi
 
@@ -131,14 +106,16 @@ jobs:
       - name: Checkout metroid at exact SHA via HTTPS
         if: steps.detect.outputs.skip != 'true'
         run: |
-          echo "Cloning with token..."
-          git clone "https://oauth2:${{ env.GITLAB_TOKEN }}@gitlab.com/cheurteen/metroid.git" /tmp/metroid
+          echo "Cloning with secret..."
+          git clone "https://oauth2:${{ secrets.GITLAB_TOKEN }}@gitlab.com/cheurteen/metroid.git" /tmp/metroid
           cd /tmp/metroid
           echo "Fetching commit ${{ env.REQUESTED_SOURCE_COMMIT }}..."
           git fetch origin ${{ env.REQUESTED_SOURCE_COMMIT }}
           git checkout ${{ env.REQUESTED_SOURCE_COMMIT }}
+          
           ACTUAL=$(git rev-parse HEAD)
           echo "CHECKED_OUT_SOURCE_COMMIT=$ACTUAL" >> $GITHUB_ENV
+          
           if [ "$ACTUAL" = "${{ env.REQUESTED_SOURCE_COMMIT }}" ]; then
             echo "SOURCE_SHA_MATCH=true" >> $GITHUB_ENV
             echo "✅ Successfully checked out commit"
@@ -157,7 +134,6 @@ jobs:
       - name: Install pinned dependencies
         if: steps.detect.outputs.skip != 'true'
         run: |
-          # setuptools provides distutils which is needed by capstone 5.0.1 on Python 3.12+
           pip install setuptools==69.0.3 capstone==5.0.1 pytest==8.3.2
           echo "CAPSTONE_VERSION=$(pip show capstone | grep Version | awk '{print $2}')" >> $GITHUB_ENV
           echo "PYTEST_VERSION=$(pip show pytest | grep Version | awk '{print $2}')" >> $GITHUB_ENV
@@ -167,12 +143,13 @@ jobs:
         if: steps.detect.outputs.skip != 'true'
         run: |
           set +e  # Ne pas s'arrêter au premier exit non-zero
+          
           cd /tmp/metroid
           export PYTHONPATH="/tmp/metroid/switch/scripts:$PYTHONPATH"
-
+          
           PROOF_DIR="$GITHUB_WORKSPACE/proof/${{ env.REQUEST_ID }}"
           mkdir -p "$PROOF_DIR"
-
+          
           EXPECTED=(
             "switch/scripts/test_experiment_record.py"
             "switch/scripts/test_candidate_schema.py"
@@ -182,11 +159,11 @@ jobs:
             "switch/scripts/test_discovery_replay.py"
             "switch/scripts/test_structural_features.py"
           )
-
+          
           TE=${#EXPECTED[@]}; TF=0; TX=0; TP=0; TFL=0; TM=0
           echo "[" > "$PROOF_DIR/test-results.json"
           FIRST=1
-
+          
           for t in "${EXPECTED[@]}"; do
             S="UNKNOWN"
             if [ ! -f "$t" ]; then
@@ -216,7 +193,7 @@ jobs:
             if [ $FIRST -eq 1 ]; then FIRST=0; else echo "," >> "$PROOF_DIR/test-results.json"; fi
             printf '{"test":"%s","status":"%s"}' "$t" "$S" >> "$PROOF_DIR/test-results.json"
           done
-
+          
           echo "]" >> "$PROOF_DIR/test-results.json"
           echo "TESTS_EXPECTED=$TE" >> $GITHUB_ENV
           echo "TESTS_FOUND=$TF" >> $GITHUB_ENV
@@ -224,11 +201,21 @@ jobs:
           echo "TESTS_PASSED=$TP" >> $GITHUB_ENV
           echo "TESTS_FAILED=$TFL" >> $GITHUB_ENV
           echo "TESTS_MISSING=$TM" >> $GITHUB_ENV
+          
+          # Déterminer le statut final
+          if [ $TM -ne 0 ]; then
+            echo "FAIL_REASON=tests_missing" >> $GITHUB_ENV
+            echo "STATUS=FAIL" >> $GITHUB_ENV
+          elif [ $TFL -ne 0 ]; then
+            echo "FAIL_REASON=tests_failed" >> $GITHUB_ENV
+            echo "STATUS=FAIL" >> $GITHUB_ENV
+          elif [ $TX -ne $TE ]; then
+            echo "FAIL_REASON=executed_ne_expected" >> $GITHUB_ENV
+            echo "STATUS=FAIL" >> $GITHUB_ENV
+          else
+            echo "STATUS=PASS" >> $GITHUB_ENV
+          fi
 
-          # Vérifications finales après tous les tests
-          if [ $TM -ne 0 ]; then echo "FAIL_REASON=tests_missing" >> $GITHUB_ENV; exit 1; fi
-          if [ $TX -ne $TE ]; then echo "FAIL_REASON=executed_ne_expected" >> $GITHUB_ENV; exit 1; fi
-          if [ $TFL -ne 0 ]; then echo "FAIL_REASON=tests_failed" >> $GITHUB_ENV; exit 1; fi
       - name: Generate run.json
         if: always() && steps.detect.outputs.skip != 'true'
         run: python3 scripts/generate_run_json.py
@@ -241,20 +228,24 @@ jobs:
           path: proof/
           retention-days: 30
 
-      - name: Update request lifecycle
-        if: always() && steps.detect.outputs.skip != 'true'
+      - name: Move request to completed or failed
+        if: always() && steps.detect.outputs.skip != 'true' && env.REQUEST_FILE != ''
         run: |
-          REQUEST_FILE="requests/pending/${{ env.REQUEST_ID }}.json"
-          if [ -f "$REQUEST_FILE" ]; then
-            if [ "${{ job.status }}" = "success" ]; then
+          if [ -f "${{ env.REQUEST_FILE }}" ]; then
+            if [ "${{ env.STATUS }}" = "PASS" ]; then
               mkdir -p requests/completed
-              mv "$REQUEST_FILE" "requests/completed/"
+              git mv "${{ env.REQUEST_FILE }}" requests/completed/ || mv "${{ env.REQUEST_FILE }}" requests/completed/
+              echo "✅ Moved to requests/completed/"
             else
               mkdir -p requests/failed
-              mv "$REQUEST_FILE" "requests/failed/"
+              git mv "${{ env.REQUEST_FILE }}" requests/failed/ || mv "${{ env.REQUEST_FILE }}" requests/failed/
+              echo "❌ Moved to requests/failed/"
             fi
+            
+            # Commit le déplacement avec GITHUB_TOKEN
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add requests/
+            git commit -m "[bot] ${{ env.REQUEST_ID }}: ${{ env.STATUS }}" || echo "Nothing to commit"
+            git push origin HEAD:main || echo "Push failed (may require manual push)"
           fi
-
-      - name: Final status check
-        if: always() && steps.detect.outputs.skip != 'true'
-        run: python3 scripts/check_status.py
