@@ -224,10 +224,10 @@ jobs:
           echo "TESTS_FAILED=$TFL" >> $GITHUB_ENV
           echo "TESTS_MISSING=$TM" >> $GITHUB_ENV
 
+          # Vérifications finales après tous les tests
           if [ $TM -ne 0 ]; then echo "FAIL_REASON=tests_missing" >> $GITHUB_ENV; exit 1; fi
-          if [ $TFL -ne 0 ]; then echo "FAIL_REASON=tests_failed" >> $GITHUB_ENV; exit 1; fi
           if [ $TX -ne $TE ]; then echo "FAIL_REASON=executed_ne_expected" >> $GITHUB_ENV; exit 1; fi
-
+          if [ $TFL -ne 0 ]; then echo "FAIL_REASON=tests_failed" >> $GITHUB_ENV; exit 1; fi
       - name: Generate run.json
         if: always() && steps.detect.outputs.skip != 'true'
         run: python3 scripts/generate_run_json.py
