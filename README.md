@@ -42,10 +42,11 @@ GitLab (cheurteen/metroid) -> GitHub Actions runner -> Proof artifacts
 - No secrets in code or committed to repo
 
 ### Token Rotation
-**GitLab PAT:**
-1. Revoke old token in GitLab -> Settings -> Access Tokens
-2. Create new token with `read_repository` scope
-3. Update `GITLAB_TOKEN` secret in GitHub -> Settings -> Secrets
+**GitLab token:**
+1. Prefer a fine-grained personal access token scoped to project `cheurteen/metroid`
+2. Grant only `Code -> Download` (needed for git clone/fetch); do not grant Code Push
+3. If using a legacy token, use the comparable minimal scope `read_repository`
+4. Update `GITLAB_TOKEN` secret in GitHub -> Settings -> Secrets
 
 **GitHub PAT:**
 1. Revoke old token in GitHub -> Settings -> Developer settings -> Personal access tokens
