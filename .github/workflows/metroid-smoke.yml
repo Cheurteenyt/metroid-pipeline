@@ -37,21 +37,12 @@ jobs:
       FAIL_REASON: ""
       CAPSTONE_VERSION: ""
       PYTEST_VERSION: ""
+      GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
     steps:
       - name: Checkout pipeline repo
         uses: actions/checkout@v4
         with:
           fetch-depth: 2
-
-      - name: Configure SSH for GitLab
-        run: |
-          mkdir -p ~/.ssh
-          chmod 700 ~/.ssh
-          echo "${{ secrets.GITLAB_SSH_KEY_B64 }}" | base64 -d > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-          eval $(ssh-agent -s)
-          ssh-add ~/.ssh/id_ed25519 2>&1 || echo "ssh-add failed"
-          ssh-keyscan -t ed25519 gitlab.com >> ~/.ssh/known_hosts 2>/dev/null
 
       - name: Detect trigger and parse request
         id: detect
@@ -69,7 +60,6 @@ jobs:
               COMMITS=$(git rev-list --reverse ${{ github.event.before }}..${{ github.sha }} 2>/dev/null || echo "${{ github.sha }}")
             fi
             
-            # Utiliser un fichier temporaire au lieu d'une variable pour éviter les problèmes YAML
             TEMP_FILE="/tmp/changed_files.txt"
             > "$TEMP_FILE"
             
@@ -137,12 +127,13 @@ jobs:
             exit 1
           fi
 
-      - name: Checkout metroid at exact SHA via SSH
+      - name: Checkout metroid at exact SHA via HTTPS
         if: steps.detect.outputs.skip != 'true'
         run: |
-          GIT_SSH_COMMAND="ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no" git clone git@gitlab.com:cheurteen/metroid.git /tmp/metroid
+          # Clone via HTTPS with token authentication
+          git clone "https://oauth2:${{ env.GITLAB_TOKEN }}@gitlab.com/cheurteen/metroid.git" /tmp/metroid
           cd /tmp/metroid
-          GIT_SSH_COMMAND="ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no" git fetch origin ${{ env.REQUESTED_SOURCE_COMMIT }}
+          git fetch origin ${{ env.REQUESTED_SOURCE_COMMIT }}
           git checkout ${{ env.REQUESTED_SOURCE_COMMIT }}
           ACTUAL=$(git rev-parse HEAD)
           echo "CHECKED_OUT_SOURCE_COMMIT=$ACTUAL" >> $GITHUB_ENV
