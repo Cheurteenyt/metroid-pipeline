@@ -284,7 +284,7 @@ def test_g_fail_inconsistent_run_json():
         env["GITHUB_WORKSPACE"] = str(tmpdir)
         
         result = subprocess.run(
-            ["python3", "scripts/check_status.py"],
+            ["python3", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts", "check_status.py")],
             capture_output=True,
             text=True,
             cwd=tmpdir,
@@ -363,7 +363,7 @@ def test_i_lifecycle_fail():
         env["GITHUB_WORKSPACE"] = str(tmpdir)
         
         result = subprocess.run(
-            ["python3", "scripts/check_status.py"],
+            ["python3", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts", "check_status.py")],
             capture_output=True,
             text=True,
             cwd=tmpdir,
@@ -423,7 +423,7 @@ def test_j_pass_complete_proof():
         env["GITHUB_WORKSPACE"] = str(tmpdir)
         
         result = subprocess.run(
-            ["python3", "scripts/check_status.py"],
+            ["python3", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts", "check_status.py")],
             capture_output=True,
             text=True,
             cwd=tmpdir,
