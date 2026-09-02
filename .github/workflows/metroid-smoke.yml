@@ -35,6 +35,8 @@ jobs:
       TESTS_FAILED: "0"
       TESTS_MISSING: "0"
       FAIL_REASON: ""
+      CAPSTONE_VERSION: ""
+      PYTEST_VERSION: ""
     steps:
       - name: Checkout pipeline repo
         uses: actions/checkout@v4
@@ -47,15 +49,9 @@ jobs:
           chmod 700 ~/.ssh
           echo "${{ secrets.GITLAB_SSH_KEY_B64 }}" | base64 -d > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
-          echo "Key first line: $(head -1 ~/.ssh/id_ed25519)"
-          echo "Key last line: $(tail -1 ~/.ssh/id_ed25519)"
-          echo "Key fingerprint:"
-          ssh-keygen -lf ~/.ssh/id_ed25519 2>&1 || echo "ssh-keygen failed"
           eval $(ssh-agent -s)
           ssh-add ~/.ssh/id_ed25519 2>&1 || echo "ssh-add failed"
           ssh-keyscan -t ed25519 gitlab.com >> ~/.ssh/known_hosts 2>/dev/null
-          echo "Testing SSH connection:"
-          ssh -v -o StrictHostKeyChecking=no -o BatchMode=yes -T git@gitlab.com 2>&1 || true
 
       - name: Detect trigger and parse request
         id: detect
@@ -67,29 +63,49 @@ jobs:
             echo "PROFILE=${{ inputs.profile }}" >> $GITHUB_ENV
             echo "skip=false" >> $GITHUB_OUTPUT
           else
-            CHANGED=$(git diff --name-only HEAD~1 HEAD -- 'requests/pending/*.json' 2>/dev/null || true)
-            REQUEST_COUNT=$(echo "$CHANGED" | grep -c '\.json$' || true)
+            if [ "${{ github.event.before }}" = "0000000000000000000000000000000000000000" ]; then
+              COMMITS="${{ github.sha }}"
+            else
+              COMMITS=$(git rev-list --reverse ${{ github.event.before }}..${{ github.sha }} 2>/dev/null || echo "${{ github.sha }}")
+            fi
+            
+            CHANGED=""
+            for commit in $COMMITS; do
+              files=$(git diff --name-only ${commit}^ ${commit} -- 'requests/pending/*.json' 2>/dev/null || true)
+              if [ -n "$files" ]; then
+                CHANGED="$CHANGED
+$files"
+              fi
+            done
+            
+            CHANGED=$(echo "$CHANGED" | sort -u | grep -v '^$' || true)
+            REQUEST_COUNT=$(echo "$CHANGED" | grep -c '\.json$' || echo "0")
+            
             if [ -z "$CHANGED" ] || [ "$REQUEST_COUNT" -eq 0 ]; then
               echo "skip=true" >> $GITHUB_OUTPUT
               exit 0
             fi
+            
             if [ "$REQUEST_COUNT" -gt 1 ]; then
               echo "REQUEST_ID=multi-fail" >> $GITHUB_ENV
               echo "FAIL_REASON=multiple_requests" >> $GITHUB_ENV
               echo "skip=false" >> $GITHUB_OUTPUT
               exit 1
             fi
+            
             REQUEST_FILE=$(echo "$CHANGED" | head -1)
             if [ ! -f "$REQUEST_FILE" ]; then
               echo "FAIL_REASON=file_not_found" >> $GITHUB_ENV
               echo "skip=false" >> $GITHUB_OUTPUT
               exit 1
             fi
+            
             python3 scripts/parse_request.py "$REQUEST_FILE" > /tmp/request_env.sh
             source /tmp/request_env.sh
             echo "REQUEST_ID=$REQUEST_ID" >> $GITHUB_ENV
             echo "REQUESTED_SOURCE_COMMIT=$REQUESTED_SOURCE_COMMIT" >> $GITHUB_ENV
             echo "PROFILE=$PROFILE" >> $GITHUB_ENV
+            
             if [ -z "$REQUEST_ID" ]; then
               echo "FAIL_REASON=empty_request_id" >> $GITHUB_ENV
               exit 1
@@ -145,16 +161,23 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install capstone
+      - name: Install pinned dependencies
         if: steps.detect.outputs.skip != 'true'
-        run: pip install capstone pytest
+        run: |
+          pip install capstone==5.0.1 pytest==8.3.2
+          echo "CAPSTONE_VERSION=$(pip show capstone | grep Version | awk '{print $2}')" >> $GITHUB_ENV
+          echo "PYTEST_VERSION=$(pip show pytest | grep Version | awk '{print $2}')" >> $GITHUB_ENV
+          echo "PYTHON_VERSION=$(python --version | awk '{print $2}')" >> $GITHUB_ENV
 
       - name: Run smoke tests
         if: steps.detect.outputs.skip != 'true'
         run: |
           cd /tmp/metroid
+          export PYTHONPATH="/tmp/metroid/switch/scripts:$PYTHONPATH"
+          
           PROOF_DIR="$GITHUB_WORKSPACE/proof/${{ env.REQUEST_ID }}"
           mkdir -p "$PROOF_DIR"
+          
           EXPECTED=(
             "switch/scripts/test_experiment_record.py"
             "switch/scripts/test_candidate_schema.py"
@@ -164,18 +187,18 @@ jobs:
             "switch/scripts/test_discovery_replay.py"
             "switch/scripts/test_structural_features.py"
           )
+          
           TE=${#EXPECTED[@]}; TF=0; TX=0; TP=0; TFL=0; TM=0
           echo "[" > "$PROOF_DIR/test-results.json"
           FIRST=1
+          
           for t in "${EXPECTED[@]}"; do
             S="UNKNOWN"
             if [ ! -f "$t" ]; then
               S="MISSING"; TM=$((TM+1))
             else
               TF=$((TF+1)); TX=$((TX+1))
-              if [[ "$t" == *test_batch_planner* ]]; then
-                pytest "$t" >> "$PROOF_DIR/stdout.txt" 2>> "$PROOF_DIR/stderr.txt"
-              elif PYTHONPATH=switch/scripts pytest "$t" -q >> "$PROOF_DIR/stdout.txt" 2>> "$PROOF_DIR/stderr.txt"; then
+              if PYTHONPATH="/tmp/metroid/switch/scripts:$PYTHONPATH" pytest "$t" -q >> "$PROOF_DIR/stdout.txt" 2>> "$PROOF_DIR/stderr.txt"; then
                 S="PASS"; TP=$((TP+1))
               else
                 S="FAIL"; TFL=$((TFL+1))
@@ -184,6 +207,7 @@ jobs:
             if [ $FIRST -eq 1 ]; then FIRST=0; else echo "," >> "$PROOF_DIR/test-results.json"; fi
             printf '{"test":"%s","status":"%s"}' "$t" "$S" >> "$PROOF_DIR/test-results.json"
           done
+          
           echo "]" >> "$PROOF_DIR/test-results.json"
           echo "TESTS_EXPECTED=$TE" >> $GITHUB_ENV
           echo "TESTS_FOUND=$TF" >> $GITHUB_ENV
@@ -191,7 +215,7 @@ jobs:
           echo "TESTS_PASSED=$TP" >> $GITHUB_ENV
           echo "TESTS_FAILED=$TFL" >> $GITHUB_ENV
           echo "TESTS_MISSING=$TM" >> $GITHUB_ENV
-          echo "Expected=$TE Found=$TF Executed=$TX Passed=$TP Failed=$TFL Missing=$TM"
+          
           if [ $TM -ne 0 ]; then echo "FAIL_REASON=tests_missing" >> $GITHUB_ENV; exit 1; fi
           if [ $TFL -ne 0 ]; then echo "FAIL_REASON=tests_failed" >> $GITHUB_ENV; exit 1; fi
           if [ $TX -ne $TE ]; then echo "FAIL_REASON=executed_ne_expected" >> $GITHUB_ENV; exit 1; fi
@@ -207,6 +231,20 @@ jobs:
           name: proof-${{ env.REQUEST_ID || format('failed-{0}', github.run_id) }}
           path: proof/
           retention-days: 30
+
+      - name: Update request lifecycle
+        if: always() && steps.detect.outputs.skip != 'true'
+        run: |
+          REQUEST_FILE="requests/pending/${{ env.REQUEST_ID }}.json"
+          if [ -f "$REQUEST_FILE" ]; then
+            if [ "${{ job.status }}" = "success" ]; then
+              mkdir -p requests/completed
+              mv "$REQUEST_FILE" "requests/completed/"
+            else
+              mkdir -p requests/failed
+              mv "$REQUEST_FILE" "requests/failed/"
+            fi
+          fi
 
       - name: Final status check
         if: always() && steps.detect.outputs.skip != 'true'
