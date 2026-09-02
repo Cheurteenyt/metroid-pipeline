@@ -1,0 +1,6 @@
+{
+  "request_id": "exact-0002",
+  "source_sha": "main",
+  "candidate_path": "switch/src/CTransform4f.cpp",
+  "description": "Test compilation workflow with real C++ file from GitLab repo"
+}
