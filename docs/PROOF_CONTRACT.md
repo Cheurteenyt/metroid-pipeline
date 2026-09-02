@@ -99,3 +99,72 @@ tests_executed == tests_expected  (required for PASS)
 The runner does NOT delete request files. If the same request is pushed
 again, the workflow runs again. This is acceptable for the POC.
 Production anti-replay will track executed request_ids.
+
+
+## Regression Profile
+
+### Additional fields in `run.json`
+
+The regression profile adds these fields:
+
+- `baseline_sha` (40-char hex) - Baseline commit SHA
+- `candidate_sha` (40-char hex) - Candidate commit SHA (must differ from baseline)
+- `baseline_actual` (40-char hex) - Actual checked-out SHA
+- `candidate_actual` (40-char hex) - Actual checked-out SHA
+- `baseline_exact_count` (int) - Number of EXACT functions in baseline
+- `candidate_exact_count` (int) - Number of EXACT functions in candidate
+- `lost_count` (int) - Number of functions lost
+- `changed_count` (int) - Number of functions with changed fingerprints
+- `reference_elf_sha256` (sha256) - SHA256 of main.elf from reference pack
+- `reference_symbols_sha256` (sha256) - SHA256 of switch_symbols.txt
+
+### Status semantics
+
+| Status | Meaning |
+|--------|---------|
+| `PASS` | No regressions detected |
+| `FAIL` | Functions lost or fingerprints changed |
+| `UNKNOWN` | Validation error or missing reference pack |
+
+### `PASS` requires ALL of:
+
+1. `baseline_sha != candidate_sha`
+2. `baseline_actual == baseline_sha`
+3. `candidate_actual == candidate_sha`
+4. `lost_count == 0`
+5. `changed_count == 0`
+6. `candidate_exact_count >= baseline_exact_count`
+7. `baseline_exact_count > 0`
+
+### Anti-false-PASS rules
+
+- `baseline_sha == candidate_sha` → `FAIL` (self-comparison)
+- Missing reference pack → `UNKNOWN`
+- SHA256 mismatch → `UNKNOWN`
+- Snapshot failed → `UNKNOWN`
+- Invalid manifest → `UNKNOWN`
+
+### Request discovery
+
+Uses exact push range (`github.event.before` to `github.sha`). NEVER uses historical discovery.
+
+### Lifecycle
+
+- `PASS` → `requests/completed/regression/`
+- `FAIL` or `UNKNOWN` → `requests/failed/`
+
+### Privacy
+
+NEVER exposes private symbol names. Only aggregated counts are reported.
+
+### Fail-closed design
+
+Any error results in `FAIL` or `UNKNOWN`, never `PASS`.
+
+### Reference pack
+
+Requires private reference pack (main.elf, switch_symbols.txt, reference.json) from secure storage.
+
+### Concurrency
+
+Uses `concurrency: group: regression-${{ github.event.inputs.request_id || github.sha }}` to prevent simultaneous processing.
