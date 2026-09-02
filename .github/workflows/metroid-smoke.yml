@@ -168,10 +168,10 @@ jobs:
         run: |
           cd /tmp/metroid
           export PYTHONPATH="/tmp/metroid/switch/scripts:$PYTHONPATH"
-          
+
           PROOF_DIR="$GITHUB_WORKSPACE/proof/${{ env.REQUEST_ID }}"
           mkdir -p "$PROOF_DIR"
-          
+
           EXPECTED=(
             "switch/scripts/test_experiment_record.py"
             "switch/scripts/test_candidate_schema.py"
@@ -181,27 +181,41 @@ jobs:
             "switch/scripts/test_discovery_replay.py"
             "switch/scripts/test_structural_features.py"
           )
-          
+
           TE=${#EXPECTED[@]}; TF=0; TX=0; TP=0; TFL=0; TM=0
           echo "[" > "$PROOF_DIR/test-results.json"
           FIRST=1
-          
+
           for t in "${EXPECTED[@]}"; do
             S="UNKNOWN"
             if [ ! -f "$t" ]; then
               S="MISSING"; TM=$((TM+1))
             else
               TF=$((TF+1)); TX=$((TX+1))
-              if PYTHONPATH="/tmp/metroid/switch/scripts:$PYTHONPATH" pytest "$t" -q >> "$PROOF_DIR/stdout.txt" 2>> "$PROOF_DIR/stderr.txt"; then
+              # Tenter pytest d'abord
+              PYTHONPATH="/tmp/metroid/switch/scripts:$PYTHONPATH" pytest "$t" -q >> "$PROOF_DIR/stdout.txt" 2>> "$PROOF_DIR/stderr.txt"
+              PYTEST_RC=$?
+              
+              if [ $PYTEST_RC -eq 0 ]; then
+                # pytest a trouvé et exécuté des tests avec succès
                 S="PASS"; TP=$((TP+1))
+              elif [ $PYTEST_RC -eq 5 ]; then
+                # pytest exit code 5 = aucun test collecté = script autonome
+                echo "--- standalone run: $t ---" >> "$PROOF_DIR/stdout.txt"
+                if PYTHONPATH="/tmp/metroid/switch/scripts:$PYTHONPATH" python "$t" >> "$PROOF_DIR/stdout.txt" 2>> "$PROOF_DIR/stderr.txt"; then
+                  S="PASS"; TP=$((TP+1))
+                else
+                  S="FAIL"; TFL=$((TFL+1))
+                fi
               else
+                # pytest a échoué (tests ont échoué ou erreur)
                 S="FAIL"; TFL=$((TFL+1))
               fi
             fi
             if [ $FIRST -eq 1 ]; then FIRST=0; else echo "," >> "$PROOF_DIR/test-results.json"; fi
             printf '{"test":"%s","status":"%s"}' "$t" "$S" >> "$PROOF_DIR/test-results.json"
           done
-          
+
           echo "]" >> "$PROOF_DIR/test-results.json"
           echo "TESTS_EXPECTED=$TE" >> $GITHUB_ENV
           echo "TESTS_FOUND=$TF" >> $GITHUB_ENV
@@ -209,12 +223,11 @@ jobs:
           echo "TESTS_PASSED=$TP" >> $GITHUB_ENV
           echo "TESTS_FAILED=$TFL" >> $GITHUB_ENV
           echo "TESTS_MISSING=$TM" >> $GITHUB_ENV
-          
+
           if [ $TM -ne 0 ]; then echo "FAIL_REASON=tests_missing" >> $GITHUB_ENV; exit 1; fi
           if [ $TFL -ne 0 ]; then echo "FAIL_REASON=tests_failed" >> $GITHUB_ENV; exit 1; fi
           if [ $TX -ne $TE ]; then echo "FAIL_REASON=executed_ne_expected" >> $GITHUB_ENV; exit 1; fi
 
-      - name: Generate run.json
         if: always() && steps.detect.outputs.skip != 'true'
         run: python3 scripts/generate_run_json.py
 
