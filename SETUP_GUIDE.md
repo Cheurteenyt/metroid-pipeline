@@ -1,66 +1,54 @@
-# Setup Guide - Create GITLAB_TOKEN Secret
+# Setup Guide - Create `GITLAB_TOKEN`
 
-## Why This Is Needed
+The GitHub workflow clones `gitlab.com/cheurteen/metroid` over HTTPS with the encrypted repository secret `GITLAB_TOKEN`.
 
-The workflow now uses `${{ secrets.GITLAB_TOKEN }}` to clone the GitLab repository. This token must be created manually in GitHub.
+## Recommended GitLab token
 
-## Step-by-Step Instructions
+Use a **fine-grained personal access token** scoped only to project `cheurteen/metroid`.
 
-### Step 1: Create a New GitLab PAT
+Minimum permission for this runner:
 
-1. Go to https://gitlab.com/-/profile/personal_access_tokens
-2. Token name: `github-runner-access`
-3. Expiration date: 90 days from now
-4. Select scopes: Check only `read_repository`
-5. Click Create personal access token
-6. Copy the token (starts with `glpat-`)
+| Operation | Resource | Permission | Access boundary |
+|---|---|---|---|
+| `git clone` / `git fetch` / Git LFS download | Code | Download | Project `cheurteen/metroid` |
 
-### Step 2: Add the Token to GitHub Secrets
+Do **not** grant Code Push. The runner never writes to GitLab.
 
-1. Go to https://github.com/Cheurteenyt/metroid-pipeline/settings/secrets/actions
-2. Click New repository secret
-3. Name: `GITLAB_TOKEN` (exact name, all caps)
-4. Value: Paste the GitLab PAT from Step 1
-5. Click Add secret
+If you use a legacy/coarse token instead of a fine-grained token, the comparable minimal scope is `read_repository`.
 
-### Step 3: Test the Setup
+## Create or adjust the GitLab token
 
-The workflow should have already been triggered by smoke-0023.json.
+1. Open GitLab token settings.
+2. Create a fine-grained personal access token for project `cheurteen/metroid`.
+3. Grant only: **Code -> Download**.
+4. Set an expiration date and copy the token.
 
-Check the workflow run:
-1. Go to https://github.com/Cheurteenyt/metroid-pipeline/actions
-2. Wait for the workflow to complete
-3. Expected result: PASS (7/7 tests)
+If the UI does not show `Code -> Download`, use a legacy/project token with `read_repository`, or use the GitLab permissions assistant to locate the Git operation permission.
 
-### Step 4: Revoke Old Tokens (Security)
+## Add it to GitHub
 
-After confirming the new setup works:
+1. Go to `https://github.com/Cheurteenyt/metroid-pipeline/settings/secrets/actions`.
+2. Create or update repository secret named exactly `GITLAB_TOKEN`.
+3. Paste the GitLab token value.
 
-1. Revoke the old GitLab PAT that was exposed in the workflow
-2. Optionally revoke the GitHub fine-grained PAT you shared
+## Test
 
-## Troubleshooting
+Add a request in `requests/pending/*.json` and push. Expected result:
 
-**Workflow fails with authentication error:**
-- Check that GITLAB_TOKEN secret exists
-- Verify the token has read_repository scope
-- Ensure the token hasn't expired
+- GitHub Actions run succeeds.
+- Artifact `proof-<request-id>` contains `run.json` with `status: PASS`.
+- Request is moved automatically to `requests/completed/` by `GITHUB_TOKEN`.
 
-**Request stays in pending/:**
-- Check workflow logs for errors
-- The request should be moved automatically on success
+## GitHub token usage
 
-## What Happens After Setup
+No personal GitHub PAT is required for normal operation. The workflow uses GitHub's built-in `GITHUB_TOKEN` with `contents: write` to move request files.
 
-- Normal operation: No further action needed
-- Creating requests: Add JSON to requests/pending/ and push
-- Checking results: View artifacts or check requests/completed/
-- Token rotation: Update the secret when the token expires
+A personal GitHub PAT is only needed if an external operator modifies files in this runner repository through the API.
 
-## Security Best Practices
+## Rotation
 
-- Never commit tokens to code
-- Use minimal scopes (read_repository only)
-- Set expiration dates (90 days recommended)
-- Rotate tokens regularly
-- Revoke immediately if exposed
+After the new secret works:
+
+1. Revoke any old GitLab token that was exposed.
+2. Revoke any temporary GitHub PAT used for setup, unless you still need API write access.
+3. For future rotation, create a new GitLab token with the same `Code -> Download` permission and update the GitHub secret. No code change is required.
