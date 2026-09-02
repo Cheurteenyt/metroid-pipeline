@@ -73,12 +73,12 @@ jobs:
             for commit in $COMMITS; do
               files=$(git diff --name-only ${commit}^ ${commit} -- 'requests/pending/*.json' 2>/dev/null || true)
               if [ -n "$files" ]; then
-                CHANGED="$CHANGED
-$files"
+                CHANGED="${CHANGED}${files}
+"
               fi
             done
             
-            CHANGED=$(echo "$CHANGED" | sort -u | grep -v '^$' || true)
+            CHANGED=$(echo -e "$CHANGED" | sort -u | grep -v '^$' || true)
             REQUEST_COUNT=$(echo "$CHANGED" | grep -c '\.json$' || echo "0")
             
             if [ -z "$CHANGED" ] || [ "$REQUEST_COUNT" -eq 0 ]; then
