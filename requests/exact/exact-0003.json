@@ -1,0 +1,6 @@
+{
+  "request_id": "exact-0003",
+  "source_sha": "main",
+  "candidate_path": "switch/src/auto/CAABoxCollisionTree.cpp",
+  "description": "Test compilation workflow with real C++ file (collision tree)"
+}
