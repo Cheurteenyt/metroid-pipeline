@@ -1,6 +1,0 @@
-{
-  "request_id": "exact-0001",
-  "source_sha": "main",
-  "candidate": "test_compile.cpp",
-  "description": "Test compilation workflow with simple C++ file"
-}
