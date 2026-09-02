@@ -131,7 +131,6 @@ jobs:
       - name: Checkout metroid at exact SHA via HTTPS
         if: steps.detect.outputs.skip != 'true'
         run: |
-          # Clone via HTTPS with token authentication
           echo "Cloning with token..."
           git clone "https://oauth2:${{ env.GITLAB_TOKEN }}@gitlab.com/cheurteen/metroid.git" /tmp/metroid
           cd /tmp/metroid
@@ -158,7 +157,8 @@ jobs:
       - name: Install pinned dependencies
         if: steps.detect.outputs.skip != 'true'
         run: |
-          pip install capstone==5.0.1 pytest==8.3.2
+          # setuptools provides distutils which is needed by capstone 5.0.1 on Python 3.12+
+          pip install setuptools==69.0.3 capstone==5.0.1 pytest==8.3.2
           echo "CAPSTONE_VERSION=$(pip show capstone | grep Version | awk '{print $2}')" >> $GITHUB_ENV
           echo "PYTEST_VERSION=$(pip show pytest | grep Version | awk '{print $2}')" >> $GITHUB_ENV
           echo "PYTHON_VERSION=$(python --version | awk '{print $2}')" >> $GITHUB_ENV
