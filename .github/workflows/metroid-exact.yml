@@ -32,7 +32,29 @@ jobs:
             echo "CANDIDATE_PATH=switch/src/CTransform4f.cpp" >> $GITHUB_ENV
           else
             # Trouver le dernier fichier ajouté dans requests/exact/
-            LATEST_FILE=$(git log --diff-filter=A --name-only --pretty=format: -- 'requests/exact/*.json' | grep -v '^$' | head -1)
+            # Use exact push range (not historical discovery)
+            BEFORE="${{ github.event.before }}"
+            AFTER="${{ github.sha }}"
+            
+            if [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+              # First push, use all commits
+              CHANGED_FILES=$(git diff --name-only --diff-filter=AM HEAD~1 HEAD -- 'requests/exact/*.json' 2>/dev/null || echo "")
+            else
+              # Use exact range
+              CHANGED_FILES=$(git diff --name-only --diff-filter=AM $BEFORE $AFTER -- 'requests/exact/*.json' 2>/dev/null || echo "")
+            fi
+            
+            FILE_COUNT=$(echo "$CHANGED_FILES" | grep -c '\.json$' || echo "0")
+            
+            if [ "$FILE_COUNT" -eq 0 ]; then
+              echo "No exact requests found in this push"
+              exit 1
+            elif [ "$FILE_COUNT" -gt 1 ]; then
+              echo "ERROR: Multiple exact requests in single push (found $FILE_COUNT)"
+              exit 1
+            fi
+            
+            LATEST_FILE=$(echo "$CHANGED_FILES" | head -1)
             if [ -z "$LATEST_FILE" ]; then
               echo "No new request file found"
               exit 1

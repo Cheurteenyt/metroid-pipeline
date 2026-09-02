@@ -1,5 +1,9 @@
 name: Metroid Regression Gate
 
+# IMPORTANT: This workflow is fail-closed. Any error, missing data, or ambiguity
+# results in FAIL or UNKNOWN, never PASS. Security of verdict is more important
+# than workflow success.
+
 on:
   push:
     paths:
@@ -7,89 +11,196 @@ on:
   workflow_dispatch:
     inputs:
       baseline_sha:
-        description: 'Baseline SHA (40 chars)'
+        description: 'Baseline SHA (40 hex chars)'
         required: true
       candidate_sha:
-        description: 'Candidate SHA (40 chars)'
+        description: 'Candidate SHA (40 hex chars, must differ from baseline)'
         required: true
+      request_id:
+        description: 'Request ID (optional)'
+        required: false
 
 permissions:
   contents: write
+
+concurrency:
+  group: regression-${{ github.event.inputs.request_id || github.sha }}
+  cancel-in-progress: false
 
 jobs:
   regression:
     runs-on: ubuntu-latest
     
     steps:
+      - name: Initialize fail-safe defaults
+        run: |
+          echo "REGRESSION_STATUS=UNKNOWN" >> $GITHUB_ENV
+          echo "REGRESSION_REASON=not_evaluated" >> $GITHUB_ENV
+          echo "BASELINE_EXACT_COUNT=0" >> $GITHUB_ENV
+          echo "CANDIDATE_EXACT_COUNT=0" >> $GITHUB_ENV
+          echo "LOST_COUNT=0" >> $GITHUB_ENV
+          echo "CHANGED_COUNT=0" >> $GITHUB_ENV
+          echo "REFERENCE_ELF_SHA256=" >> $GITHUB_ENV
+          echo "REFERENCE_SYMBOLS_SHA256=" >> $GITHUB_ENV
+      
       - name: Checkout pipeline repo
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
       
-      - name: Parse request
+      - name: Parse and validate request
         id: parse
         run: |
           echo "=== Parsing regression request ==="
           
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "Manual trigger"
-            echo "REQUEST_ID=regression-manual-$(date +%s)" >> $GITHUB_ENV
-            echo "BASELINE_SHA=${{ inputs.baseline_sha }}" >> $GITHUB_ENV
-            echo "CANDIDATE_SHA=${{ inputs.candidate_sha }}" >> $GITHUB_ENV
+            echo "Manual trigger detected"
+            REQUEST_ID="${{ github.event.inputs.request_id }}"
+            if [ -z "$REQUEST_ID" ]; then
+              REQUEST_ID="regression-manual-$(date +%s)"
+            fi
+            BASELINE_SHA="${{ github.event.inputs.baseline_sha }}"
+            CANDIDATE_SHA="${{ github.event.inputs.candidate_sha }}"
           else
-            # Trouver le dernier fichier de requête regression
-            LATEST_FILE=$(git log --diff-filter=A --name-only --pretty=format: -- 'requests/regression/*.json' | grep -v '^$' | head -1)
-            if [ -z "$LATEST_FILE" ]; then
-              echo "No regression request found"
+            # Push event: use exact range from GitHub
+            BEFORE="${{ github.event.before }}"
+            AFTER="${{ github.sha }}"
+            
+            if [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+              # First push, use all commits
+              CHANGED_FILES=$(git diff --name-only --diff-filter=AM HEAD~1 HEAD -- 'requests/regression/*.json' 2>/dev/null || echo "")
+            else
+              # Use exact range
+              CHANGED_FILES=$(git diff --name-only --diff-filter=AM $BEFORE $AFTER -- 'requests/regression/*.json' 2>/dev/null || echo "")
+            fi
+            
+            # Count changed files
+            FILE_COUNT=$(echo "$CHANGED_FILES" | grep -c '\.json$' || echo "0")
+            
+            if [ "$FILE_COUNT" -eq 0 ]; then
+              echo "No regression requests found in this push"
+              echo "REGRESSION_STATUS=UNKNOWN" >> $GITHUB_ENV
+              echo "REGRESSION_REASON=no_request_found" >> $GITHUB_ENV
+              exit 0
+            elif [ "$FILE_COUNT" -gt 1 ]; then
+              echo "ERROR: Multiple regression requests in single push (found $FILE_COUNT)"
+              echo "REGRESSION_STATUS=FAIL" >> $GITHUB_ENV
+              echo "REGRESSION_REASON=multiple_requests" >> $GITHUB_ENV
               exit 1
             fi
             
-            echo "Request file: $LATEST_FILE"
+            REQUEST_FILE=$(echo "$CHANGED_FILES" | head -1)
             
-            # Parser le JSON
-            REQUEST_ID=$(jq -r '.request_id' "$LATEST_FILE")
-            BASELINE_SHA=$(jq -r '.baseline_sha' "$LATEST_FILE")
-            CANDIDATE_SHA=$(jq -r '.candidate_sha' "$LATEST_FILE")
+            if [ ! -f "$REQUEST_FILE" ]; then
+              echo "ERROR: Request file not found: $REQUEST_FILE"
+              echo "REGRESSION_STATUS=FAIL" >> $GITHUB_ENV
+              echo "REGRESSION_REASON=request_file_missing" >> $GITHUB_ENV
+              exit 1
+            fi
             
-            echo "REQUEST_ID=$REQUEST_ID" >> $GITHUB_ENV
-            echo "BASELINE_SHA=$BASELINE_SHA" >> $GITHUB_ENV
-            echo "CANDIDATE_SHA=$CANDIDATE_SHA" >> $GITHUB_ENV
-            echo "REQUEST_FILE=$LATEST_FILE" >> $GITHUB_ENV
+            # Parse JSON
+            if ! python3 scripts/parse_regression_request.py "$REQUEST_FILE"; then
+              echo "ERROR: Invalid request JSON"
+              echo "REGRESSION_STATUS=FAIL" >> $GITHUB_ENV
+              echo "REGRESSION_REASON=invalid_request_json" >> $GITHUB_ENV
+              exit 1
+            fi
+            
+            # Read environment variables set by parse_regression_request.py
+            REQUEST_ID=$(cat $GITHUB_ENV | grep REQUEST_ID= | cut -d= -f2)
+            BASELINE_SHA=$(cat $GITHUB_ENV | grep BASELINE_SHA= | cut -d= -f2)
+            CANDIDATE_SHA=$(cat $GITHUB_ENV | grep CANDIDATE_SHA= | cut -d= -f2)
           fi
+          
+          # Validate SHA format (40 hex chars)
+          if ! [[ "$BASELINE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "ERROR: Invalid baseline SHA format (must be 40 hex chars)"
+            echo "REGRESSION_STATUS=FAIL" >> $GITHUB_ENV
+            echo "REGRESSION_REASON=invalid_baseline_sha" >> $GITHUB_ENV
+            exit 1
+          fi
+          
+          if ! [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "ERROR: Invalid candidate SHA format (must be 40 hex chars)"
+            echo "REGRESSION_STATUS=FAIL" >> $GITHUB_ENV
+            echo "REGRESSION_REASON=invalid_candidate_sha" >> $GITHUB_ENV
+            exit 1
+          fi
+          
+          # CRITICAL: Refuse self-comparison in normal regression mode
+          if [ "$BASELINE_SHA" = "$CANDIDATE_SHA" ]; then
+            echo "ERROR: baseline_sha equals candidate_sha (self-comparison not allowed)"
+            echo "REGRESSION_STATUS=FAIL" >> $GITHUB_ENV
+            echo "REGRESSION_REASON=baseline_equals_candidate" >> $GITHUB_ENV
+            exit 1
+          fi
+          
+          echo "REQUEST_ID=$REQUEST_ID" >> $GITHUB_ENV
+          echo "BASELINE_SHA=$BASELINE_SHA" >> $GITHUB_ENV
+          echo "CANDIDATE_SHA=$CANDIDATE_SHA" >> $GITHUB_ENV
           
           echo "Parsed:"
           echo "  Request ID: $REQUEST_ID"
           echo "  Baseline: $BASELINE_SHA"
           echo "  Candidate: $CANDIDATE_SHA"
       
-      - name: Validate SHAs
+      - name: Download and verify reference pack
         run: |
-          echo "=== Validating SHA format ==="
+          echo "=== Downloading and verifying reference pack ==="
           
-          if [ ${#BASELINE_SHA} -ne 40 ] || ! echo "$BASELINE_SHA" | grep -qE '^[0-9a-f]{40}$'; then
-            echo "ERROR: Invalid baseline SHA format"
+          # Check if REFERENCE_PACK_SOURCE is configured
+          if [ -z "${{ secrets.REFERENCE_PACK_SOURCE }}" ]; then
+            echo "ERROR: REFERENCE_PACK_SOURCE secret not configured"
+            echo "Set REFERENCE_PACK_SOURCE to the URL or absolute path of the reference pack"
+            echo "REGRESSION_STATUS=UNKNOWN" >> $GITHUB_ENV
+            echo "REGRESSION_REASON=reference_pack_not_configured" >> $GITHUB_ENV
             exit 1
           fi
           
-          if [ ${#CANDIDATE_SHA} -ne 40 ] || ! echo "$CANDIDATE_SHA" | grep -qE '^[0-9a-f]{40}$'; then
-            echo "ERROR: Invalid candidate SHA format"
+          export REFERENCE_PACK_SOURCE="${{ secrets.REFERENCE_PACK_SOURCE }}"
+          export REFERENCE_PACK_DIR="/tmp/reference-pack"
+          
+          # Optional: authenticated access
+          if [ -n "${{ secrets.REFERENCE_PACK_TOKEN }}" ]; then
+            export REFERENCE_PACK_TOKEN="${{ secrets.REFERENCE_PACK_TOKEN }}"
+          fi
+          
+          # Download and verify
+          if ! bash scripts/download_reference_pack.sh; then
+            echo "ERROR: Reference pack download or verification failed"
+            echo "REGRESSION_STATUS=UNKNOWN" >> $GITHUB_ENV
+            echo "REGRESSION_REASON=reference_pack_download_failed" >> $GITHUB_ENV
             exit 1
           fi
           
-          echo "✓ Both SHAs are valid 40-char hex"
+          echo "✓ Reference pack downloaded and verified successfully"
       
       - name: Clone baseline from GitLab
         run: |
           echo "=== Cloning baseline at $BASELINE_SHA ==="
-          git clone https://oauth2:${{ secrets.GITLAB_TOKEN }}@gitlab.com/cheurteen/metroid.git /tmp/baseline
+          
+          if ! git clone https://oauth2:${{ secrets.GITLAB_TOKEN }}@gitlab.com/cheurteen/metroid.git /tmp/baseline; then
+            echo "ERROR: Failed to clone baseline"
+            echo "REGRESSION_STATUS=UNKNOWN" >> $GITHUB_ENV
+            echo "REGRESSION_REASON=baseline_clone_failed" >> $GITHUB_ENV
+            exit 1
+          fi
+          
           cd /tmp/baseline
-          git checkout $BASELINE_SHA
+          if ! git checkout $BASELINE_SHA; then
+            echo "ERROR: Failed to checkout baseline"
+            echo "REGRESSION_STATUS=UNKNOWN" >> $GITHUB_ENV
+            echo "REGRESSION_REASON=baseline_checkout_failed" >> $GITHUB_ENV
+            exit 1
+          fi
           
           ACTUAL=$(git rev-parse HEAD)
           echo "BASELINE_ACTUAL=$ACTUAL" >> $GITHUB_ENV
           
           if [ "$ACTUAL" != "$BASELINE_SHA" ]; then
             echo "ERROR: SHA mismatch after checkout"
+            echo "REGRESSION_STATUS=FAIL" >> $GITHUB_ENV
+            echo "REGRESSION_REASON=baseline_checkout_mismatch" >> $GITHUB_ENV
             exit 1
           fi
           
@@ -98,120 +209,249 @@ jobs:
       - name: Clone candidate from GitLab
         run: |
           echo "=== Cloning candidate at $CANDIDATE_SHA ==="
-          git clone https://oauth2:${{ secrets.GITLAB_TOKEN }}@gitlab.com/cheurteen/metroid.git /tmp/candidate
+          
+          if ! git clone https://oauth2:${{ secrets.GITLAB_TOKEN }}@gitlab.com/cheurteen/metroid.git /tmp/candidate; then
+            echo "ERROR: Failed to clone candidate"
+            echo "REGRESSION_STATUS=UNKNOWN" >> $GITHUB_ENV
+            echo "REGRESSION_REASON=candidate_clone_failed" >> $GITHUB_ENV
+            exit 1
+          fi
+          
           cd /tmp/candidate
-          git checkout $CANDIDATE_SHA
+          if ! git checkout $CANDIDATE_SHA; then
+            echo "ERROR: Failed to checkout candidate"
+            echo "REGRESSION_STATUS=UNKNOWN" >> $GITHUB_ENV
+            echo "REGRESSION_REASON=candidate_checkout_failed" >> $GITHUB_ENV
+            exit 1
+          fi
           
           ACTUAL=$(git rev-parse HEAD)
           echo "CANDIDATE_ACTUAL=$ACTUAL" >> $GITHUB_ENV
           
           if [ "$ACTUAL" != "$CANDIDATE_SHA" ]; then
             echo "ERROR: SHA mismatch after checkout"
+            echo "REGRESSION_STATUS=FAIL" >> $GITHUB_ENV
+            echo "REGRESSION_REASON=candidate_checkout_mismatch" >> $GITHUB_ENV
             exit 1
           fi
           
           echo "✓ Candidate checked out successfully"
       
+      - name: Generate baseline snapshot
+        run: |
+          echo "=== Generating baseline snapshot ==="
+          
+          cd /tmp/baseline
+          
+          # Set environment variables for snapshot_state.py
+          export METROID_ELF="/tmp/reference-pack/main.elf"
+          export METROID_SYMBOLS="/tmp/reference-pack/switch_symbols.txt"
+          export METROID_REPO="/tmp/baseline/switch"
+          export METROID_CLANG="/usr/bin/clang-17"
+          export METROID_NM="/usr/bin/llvm-nm-17"
+          
+          # Check if snapshot_state.py exists
+          if [ ! -f "switch/scripts/snapshot_state.py" ]; then
+            echo "ERROR: snapshot_state.py not found in baseline"
+            echo "REGRESSION_STATUS=UNKNOWN" >> $GITHUB_ENV
+            echo "REGRESSION_REASON=baseline_snapshot_script_missing" >> $GITHUB_ENV
+            exit 1
+          fi
+          
+          # Generate snapshot (using if ! ...; then instead of set -e + SNAPSHOT_RC=$?)
+          if ! python3 switch/scripts/snapshot_state.py /tmp/baseline_manifest.json; then
+            echo "ERROR: Baseline snapshot generation failed"
+            echo "REGRESSION_STATUS=UNKNOWN" >> $GITHUB_ENV
+            echo "REGRESSION_REASON=baseline_snapshot_failed" >> $GITHUB_ENV
+            exit 1
+          fi
+          
+          if [ ! -f "/tmp/baseline_manifest.json" ]; then
+            echo "ERROR: Baseline snapshot file not created"
+            echo "REGRESSION_STATUS=UNKNOWN" >> $GITHUB_ENV
+            echo "REGRESSION_REASON=baseline_snapshot_missing" >> $GITHUB_ENV
+            exit 1
+          fi
+          
+          echo "✓ Baseline snapshot generated"
+      
+      - name: Generate candidate snapshot
+        run: |
+          echo "=== Generating candidate snapshot ==="
+          
+          cd /tmp/candidate
+          
+          # Set environment variables for snapshot_state.py
+          export METROID_ELF="/tmp/reference-pack/main.elf"
+          export METROID_SYMBOLS="/tmp/reference-pack/switch_symbols.txt"
+          export METROID_REPO="/tmp/candidate/switch"
+          export METROID_CLANG="/usr/bin/clang-17"
+          export METROID_NM="/usr/bin/llvm-nm-17"
+          
+          # Check if snapshot_state.py exists
+          if [ ! -f "switch/scripts/snapshot_state.py" ]; then
+            echo "ERROR: snapshot_state.py not found in candidate"
+            echo "REGRESSION_STATUS=UNKNOWN" >> $GITHUB_ENV
+            echo "REGRESSION_REASON=candidate_snapshot_script_missing" >> $GITHUB_ENV
+            exit 1
+          fi
+          
+          # Generate snapshot (using if ! ...; then instead of set -e + SNAPSHOT_RC=$?)
+          if ! python3 switch/scripts/snapshot_state.py /tmp/candidate_manifest.json; then
+            echo "ERROR: Candidate snapshot generation failed"
+            echo "REGRESSION_STATUS=UNKNOWN" >> $GITHUB_ENV
+            echo "REGRESSION_REASON=candidate_snapshot_failed" >> $GITHUB_ENV
+            exit 1
+          fi
+          
+          if [ ! -f "/tmp/candidate_manifest.json" ]; then
+            echo "ERROR: Candidate snapshot file not created"
+            echo "REGRESSION_STATUS=UNKNOWN" >> $GITHUB_ENV
+            echo "REGRESSION_REASON=candidate_snapshot_missing" >> $GITHUB_ENV
+            exit 1
+          fi
+          
+          echo "✓ Candidate snapshot generated"
+      
       - name: Run regression comparison
-        id: compare
         run: |
           echo "=== Running regression comparison ==="
           
-          mkdir -p $GITHUB_WORKSPACE/proof
-          cd $GITHUB_WORKSPACE/proof
+          mkdir -p $GITHUB_WORKSPACE/proof/$REQUEST_ID
+          cd $GITHUB_WORKSPACE/proof/$REQUEST_ID
           
-          # Vérifier que les manifests existent
-          if [ ! -f "/tmp/baseline/switch/docs/verified_manifest.json" ]; then
-            echo "ERROR: Baseline verified_manifest.json not found"
-            echo "REGRESSION_STATUS=FAIL" >> $GITHUB_ENV
-            echo "REGRESSION_REASON=baseline_manifest_missing" >> $GITHUB_ENV
-            exit 0
-          fi
+          # Copy manifests
+          cp /tmp/baseline_manifest.json baseline_manifest.json
+          cp /tmp/candidate_manifest.json candidate_manifest.json
           
-          if [ ! -f "/tmp/candidate/switch/docs/verified_manifest.json" ]; then
-            echo "ERROR: Candidate verified_manifest.json not found"
-            echo "REGRESSION_STATUS=FAIL" >> $GITHUB_ENV
-            echo "REGRESSION_REASON=candidate_manifest_missing" >> $GITHUB_ENV
-            exit 0
-          fi
-          
-          # Copier les manifests
-          cp /tmp/baseline/switch/docs/verified_manifest.json baseline_manifest.json
-          cp /tmp/candidate/switch/docs/verified_manifest.json candidate_manifest.json
-          
-          # Compter les fonctions EXACT
-          BASELINE_COUNT=$(jq '.verified | length' baseline_manifest.json)
-          CANDIDATE_COUNT=$(jq '.verified | length' candidate_manifest.json)
-          
-          echo "Baseline EXACT functions: $BASELINE_COUNT"
-          echo "Candidate EXACT functions: $CANDIDATE_COUNT"
-          
-          # Comparer (logique simple : chaque fonction du baseline doit être dans candidate)
-          python3 $GITHUB_WORKSPACE/scripts/regression_compare.py \
+          # Run comparison (hardened version v2)
+          if ! python3 $GITHUB_WORKSPACE/scripts/regression_compare.py \
             --baseline baseline_manifest.json \
             --candidate candidate_manifest.json \
-            --output comparison.json
-          
-          COMPARE_RC=$?
-          
-          if [ $COMPARE_RC -eq 0 ]; then
-            echo "REGRESSION_STATUS=PASS" >> $GITHUB_ENV
-            echo "✓ No regressions detected"
-          else
+            --output comparison.json; then
+            COMPARE_RC=$?
             echo "REGRESSION_STATUS=FAIL" >> $GITHUB_ENV
             echo "REGRESSION_REASON=functions_lost" >> $GITHUB_ENV
-            echo "❌ Regressions detected"
+            echo "✗ Regressions detected (exit code $COMPARE_RC)"
+          else
+            echo "REGRESSION_STATUS=PASS" >> $GITHUB_ENV
+            echo "✓ No regressions detected"
           fi
           
-          # Sauvegarder les métriques
-          echo "BASELINE_COUNT=$BASELINE_COUNT" >> $GITHUB_ENV
-          echo "CANDIDATE_COUNT=$CANDIDATE_COUNT" >> $GITHUB_ENV
+          # Extract metrics from comparison.json (aggregated only, no private symbols)
+          if [ -f "comparison.json" ]; then
+            BASELINE_COUNT=$(jq '.baseline_count // 0' comparison.json)
+            CANDIDATE_COUNT=$(jq '.candidate_count // 0' comparison.json)
+            LOST_COUNT=$(jq '.lost_count // 0' comparison.json)
+            CHANGED_COUNT=$(jq '.changed_count // 0' comparison.json)
+            
+            echo "BASELINE_EXACT_COUNT=$BASELINE_COUNT" >> $GITHUB_ENV
+            echo "CANDIDATE_EXACT_COUNT=$CANDIDATE_COUNT" >> $GITHUB_ENV
+            echo "LOST_COUNT=$LOST_COUNT" >> $GITHUB_ENV
+            echo "CHANGED_COUNT=$CHANGED_COUNT" >> $GITHUB_ENV
+          fi
       
-      - name: Generate proof
+      - name: Generate proof (always runs)
+        if: always()
         run: |
           echo "=== Generating regression proof ==="
-          cd $GITHUB_WORKSPACE/proof
           
-          cat > run.json <<EOF
-          {
-            "request_id": "$REQUEST_ID",
-            "profile": "regression",
-            "baseline_sha": "$BASELINE_SHA",
-            "candidate_sha": "$CANDIDATE_SHA",
-            "baseline_actual": "$BASELINE_ACTUAL",
-            "candidate_actual": "$CANDIDATE_ACTUAL",
-            "baseline_exact_count": $BASELINE_COUNT,
-            "candidate_exact_count": $CANDIDATE_COUNT,
-            "status": "$REGRESSION_STATUS",
-            "reason": "${REGRESSION_REASON:-}",
-            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          }
-          EOF
+          cd $GITHUB_WORKSPACE/proof/$REQUEST_ID
+          
+          # Generate run.json using Python (safe JSON generation)
+          if ! python3 $GITHUB_WORKSPACE/scripts/generate_regression_run_json.py; then
+            echo "ERROR: Failed to generate run.json"
+            # Create minimal fallback
+            cat > run.json <<EOF
+{
+  "request_id": "$REQUEST_ID",
+  "profile": "regression",
+  "status": "UNKNOWN",
+  "reason": "proof_generation_failed"
+}
+EOF
+          fi
           
           echo "Proof generated: run.json"
-          cat run.json
       
-      - name: Upload artifacts
+      - name: Upload artifacts (always runs)
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: proof-${{ env.REQUEST_ID }}
           path: proof/
           retention-days: 90
       
-      - name: Move request to completed
-        if: env.REQUEST_FILE != ''
+      - name: Validate proof (always runs)
+        if: always()
         run: |
-          echo "=== Moving request to completed ==="
+          echo "=== Validating proof ==="
           
-          mkdir -p requests/completed/regression
+          cd $GITHUB_WORKSPACE/proof/$REQUEST_ID
           
-          if [ -f "$REQUEST_FILE" ]; then
-            mv "$REQUEST_FILE" requests/completed/regression/
-            echo "Moved $REQUEST_FILE to requests/completed/regression/"
+          if [ ! -f "run.json" ]; then
+            echo "ERROR: run.json missing"
+            echo "REGRESSION_STATUS=UNKNOWN" >> $GITHUB_ENV
+            echo "REGRESSION_REASON=proof_missing" >> $GITHUB_ENV
+            exit 1
           fi
           
+          if ! python3 $GITHUB_WORKSPACE/scripts/check_status.py; then
+            echo "✗ Proof validation failed"
+            echo "REGRESSION_STATUS=FAIL" >> $GITHUB_ENV
+            echo "REGRESSION_REASON=proof_validation_failed" >> $GITHUB_ENV
+            exit 1
+          fi
+          
+          echo "✓ Proof validation passed"
+      
+      - name: Move request to appropriate directory (always runs)
+        if: always()
+        run: |
+          echo "=== Moving request based on final status ==="
+          
+          STATUS="${{ env.REGRESSION_STATUS }}"
+          REQUEST_FILE="${{ env.REQUEST_FILE }}"
+          
+          if [ -z "$REQUEST_FILE" ]; then
+            echo "No request file to move"
+            exit 0
+          fi
+          
+          if [ ! -f "$REQUEST_FILE" ]; then
+            echo "Request file not found: $REQUEST_FILE"
+            exit 0
+          fi
+          
+          # Determine destination based on status
+          if [ "$STATUS" = "PASS" ]; then
+            DEST_DIR="requests/completed/regression"
+          else
+            DEST_DIR="requests/failed"
+          fi
+          
+          mkdir -p "$DEST_DIR"
+          mv "$REQUEST_FILE" "$DEST_DIR/"
+          
+          echo "Moved $REQUEST_FILE to $DEST_DIR/ (status: $STATUS)"
+          
+          # Commit the move
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
           git add requests/
-          git commit -m "chore: move $REQUEST_ID to completed ($REGRESSION_STATUS)" || echo "No changes"
-          git push || echo "Push failed"
+          git commit -m "chore: move $REQUEST_ID to $(basename $DEST_DIR) ($STATUS)" || echo "No changes to commit"
+          git push || echo "Push failed (non-critical)"
+      
+      - name: Final status check
+        if: always()
+        run: |
+          echo "=== Final status ==="
+          echo "Status: ${{ env.REGRESSION_STATUS }}"
+          echo "Reason: ${{ env.REGRESSION_REASON }}"
+          
+          # Exit with appropriate code
+          if [ "${{ env.REGRESSION_STATUS }}" = "PASS" ]; then
+            exit 0
+          else
+            exit 1
+          fi

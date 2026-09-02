@@ -1,123 +1,84 @@
 #!/usr/bin/env python3
-"""
-Regression comparison for verified manifests.
+"""Regression comparison for verified manifests (HARDENED v2).
 
-Compares baseline and candidate verified_manifest.json files to detect:
-- Functions lost (in baseline but not in candidate)
-- Fingerprint changes (same function, different fingerprint)
-- Count decreases
+Fixes vs v1:
+  - Fingerprint must match ^sha256:[0-9a-f]{64}$ (real SHA-256), not just a prefix.
+  - Privacy preserved: only aggregated counts are reported.
 
 Exit codes:
-  0 = no regressions
-  2 = regressions detected
+  0 = PASS (no regressions)
+  2 = FAIL (regressions detected)
+  3 = UNKNOWN (validation error / malformed data)
 """
-
-import argparse
-import json
-import sys
+import argparse, json, re, sys
 from pathlib import Path
 
-def load_manifest(path: Path) -> dict:
-    """Load and validate a verified manifest."""
+FP_RE = re.compile(r'^sha256:[0-9a-f]{64}$')
+
+def fail(msg):
+    print(f"ERROR: {msg}", file=sys.stderr)
+    sys.exit(3)
+
+def load_manifest(path):
+    if not path.exists():
+        fail(f"file not found: {path}")
     try:
         data = json.loads(path.read_text(encoding='utf-8'))
+    except json.JSONDecodeError as e:
+        fail(f"invalid JSON in {path}: {e}")
     except Exception as e:
-        print(f"ERROR: Cannot read {path}: {e}", file=sys.stderr)
-        sys.exit(2)
-    
+        fail(f"cannot read {path}: {e}")
+    if not isinstance(data, dict):
+        fail(f"{path} is not a JSON object")
     if 'verified' not in data:
-        print(f"ERROR: {path} missing 'verified' key", file=sys.stderr)
-        sys.exit(2)
-    
+        fail(f"{path} missing 'verified' key")
+    verified = data['verified']
+    if not isinstance(verified, dict):
+        fail(f"{path} 'verified' is not a dict")
+    for sym, entry in verified.items():
+        if not isinstance(entry, dict):
+            fail(f"{path} entry not a dict")
+        fp = entry.get('fingerprint')
+        if not isinstance(fp, str):
+            fail(f"{path} fingerprint not a string")
+        if not FP_RE.match(fp):
+            fail(f"{path} fingerprint is not a valid sha256 (64 hex): {fp[:50]}...")
     return data
 
-def compare_manifests(baseline: dict, candidate: dict) -> tuple[bool, list[str]]:
-    """
-    Compare two manifests and return (passed, errors).
-    
-    Rules:
-    1. Every function in baseline must exist in candidate
-    2. Fingerprint must be unchanged
-    3. Candidate count must not decrease
-    """
-    errors = []
-    
-    b_verified = baseline.get('verified', {})
-    c_verified = candidate.get('verified', {})
-    
-    b_count = len(b_verified)
-    c_count = len(c_verified)
-    
-    print(f"Baseline: {b_count} EXACT functions")
-    print(f"Candidate: {c_count} EXACT functions")
-    
-    # Rule 1: Check for lost functions
-    lost = []
-    for symbol in b_verified.keys():
-        if symbol not in c_verified:
-            lost.append(symbol)
-    
+def compare(baseline, candidate):
+    b = baseline.get('verified', {})
+    c = candidate.get('verified', {})
+    lost = [s for s in b if s not in c]
+    changed = [s for s in b if s in c and b[s].get('fingerprint') != c[s].get('fingerprint')]
+    metrics = {
+        'baseline_count': len(b),
+        'candidate_count': len(c),
+        'lost_count': len(lost),
+        'changed_count': len(changed)
+    }
     if lost:
-        errors.append(f"Lost {len(lost)} functions:")
-        for symbol in lost[:10]:  # Show first 10
-            errors.append(f"  - {symbol}")
-        if len(lost) > 10:
-            errors.append(f"  ... and {len(lost) - 10} more")
-    
-    # Rule 2: Check for fingerprint changes
-    changed = []
-    for symbol in b_verified.keys():
-        if symbol in c_verified:
-            b_fp = b_verified[symbol].get('fingerprint', '')
-            c_fp = c_verified[symbol].get('fingerprint', '')
-            if b_fp != c_fp:
-                changed.append(symbol)
-    
+        return 'FAIL', f'functions_lost:{len(lost)}', metrics
     if changed:
-        errors.append(f"Fingerprint changed for {len(changed)} functions:")
-        for symbol in changed[:10]:
-            errors.append(f"  - {symbol}")
-        if len(changed) > 10:
-            errors.append(f"  ... and {len(changed) - 10} more")
-    
-    # Rule 3: Count must not decrease
-    if c_count < b_count:
-        errors.append(f"Count decreased: {b_count} -> {c_count} ({c_count - b_count} lost)")
-    
-    passed = len(errors) == 0
-    return passed, errors
+        return 'FAIL', f'fingerprints_changed:{len(changed)}', metrics
+    if len(c) < len(b):
+        return 'FAIL', f'count_decreased:{len(b)}->{len(c)}', metrics
+    return 'PASS', 'no_regressions', metrics
 
 def main():
-    parser = argparse.ArgumentParser(description='Compare verified manifests')
-    parser.add_argument('--baseline', required=True, type=Path, help='Baseline manifest')
-    parser.add_argument('--candidate', required=True, type=Path, help='Candidate manifest')
-    parser.add_argument('--output', type=Path, help='Output JSON file')
-    
-    args = parser.parse_args()
-    
-    print(f"Loading baseline: {args.baseline}")
-    baseline = load_manifest(args.baseline)
-    
-    print(f"Loading candidate: {args.candidate}")
-    candidate = load_manifest(args.candidate)
-    
-    print("\nComparing manifests...")
-    passed, errors = compare_manifests(baseline, candidate)
-    
-    if passed:
-        print("\n✅ PASS: No regressions detected")
-        result = {'status': 'PASS', 'errors': []}
-    else:
-        print("\n❌ FAIL: Regressions detected")
-        for error in errors:
-            print(error)
-        result = {'status': 'FAIL', 'errors': errors}
-    
-    if args.output:
-        args.output.write_text(json.dumps(result, indent=2), encoding='utf-8')
-        print(f"\nResults written to {args.output}")
-    
-    sys.exit(0 if passed else 2)
+    p = argparse.ArgumentParser()
+    p.add_argument('--baseline', required=True, type=Path)
+    p.add_argument('--candidate', required=True, type=Path)
+    p.add_argument('--output', type=Path)
+    a = p.parse_args()
+    baseline = load_manifest(a.baseline)
+    candidate = load_manifest(a.candidate)
+    status, reason, m = compare(baseline, candidate)
+    print(f"baseline={m['baseline_count']} candidate={m['candidate_count']} lost={m['lost_count']} changed={m['changed_count']}")
+    print(('PASS: ' if status=='PASS' else 'FAIL: ') + reason)
+    result = {'status': status, 'reason': reason, **m}
+    if a.output:
+        a.output.write_text(json.dumps(result, indent=2), encoding='utf-8')
+    sys.exit(0 if status=='PASS' else 2)
 
 if __name__ == '__main__':
     main()
