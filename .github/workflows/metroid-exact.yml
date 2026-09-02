@@ -1,0 +1,226 @@
+name: Metroid Exact Verification (Phase A)
+
+on:
+  push:
+    paths:
+      - 'requests/exact/*.json'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  exact:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout pipeline repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Parse request
+        id: parse
+        run: |
+          echo "=== Parsing request ==="
+          
+          # Trouver le fichier de requête le plus récent
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Manual trigger - using default test"
+            echo "REQUEST_ID=exact-test" >> $GITHUB_ENV
+            echo "SOURCE_SHA=main" >> $GITHUB_ENV
+          else
+            # Trouver le dernier fichier ajouté dans requests/exact/
+            LATEST_FILE=$(git log --diff-filter=A --name-only --pretty=format: -- 'requests/exact/*.json' | grep -v '^$' | head -1)
+            if [ -z "$LATEST_FILE" ]; then
+              echo "No new request file found"
+              exit 1
+            fi
+            
+            echo "Request file: $LATEST_FILE"
+            
+            # Parser le JSON
+            REQUEST_ID=$(jq -r '.request_id' "$LATEST_FILE")
+            SOURCE_SHA=$(jq -r '.source_sha' "$LATEST_FILE")
+            CANDIDATE=$(jq -r '.candidate' "$LATEST_FILE")
+            
+            echo "REQUEST_ID=$REQUEST_ID" >> $GITHUB_ENV
+            echo "SOURCE_SHA=$SOURCE_SHA" >> $GITHUB_ENV
+            echo "CANDIDATE=$CANDIDATE" >> $GITHUB_ENV
+            echo "REQUEST_FILE=$LATEST_FILE" >> $GITHUB_ENV
+          fi
+          
+          echo "Parsed:"
+          echo "  Request ID: $REQUEST_ID"
+          echo "  Source SHA: $SOURCE_SHA"
+          echo "  Candidate: $CANDIDATE"
+      
+      - name: Checkout GitLab repo
+        run: |
+          echo "=== Checking out GitLab repo at SHA $SOURCE_SHA ==="
+          git clone https://oauth2:${{ secrets.GITLAB_TOKEN }}@gitlab.com/cheurteen/metroid.git /tmp/metroid
+          cd /tmp/metroid
+          
+          if [ "$SOURCE_SHA" != "main" ]; then
+            git checkout $SOURCE_SHA
+          fi
+          
+          echo "Checked out commit:"
+          git log -1 --oneline
+      
+      - name: Install LLVM 17 and dependencies
+        run: |
+          echo "=== Installing LLVM 17 and AArch64 toolchain ==="
+          
+          # Installer LLVM 17
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
+          sudo add-apt-repository "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-17 main"
+          sudo apt-get update
+          sudo apt-get install -y llvm-17 clang-17 lld-17 llvm-17-tools
+          
+          # Installer la toolchain AArch64
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu binutils-aarch64-linux-gnu
+          
+          # Installer les dépendances Python
+          pip install capstone pyelftools
+          
+          # Vérifier les installations
+          echo "LLVM version:"
+          clang++-17 --version
+          echo "AArch64 toolchain:"
+          aarch64-linux-gnu-gcc --version
+          echo "Capstone:"
+          python3 -c "import capstone; print(capstone.__version__)"
+      
+      - name: Compile candidate
+        id: compile
+        run: |
+          echo "=== Compiling candidate: $CANDIDATE ==="
+          cd /tmp/metroid
+          
+          # Créer le répertoire de preuve
+          mkdir -p $GITHUB_WORKSPACE/proof
+          cd $GITHUB_WORKSPACE/proof
+          
+          # Copier les fichiers du candidat
+          if [ ! -f "/tmp/metroid/switch/scripts/$CANDIDATE" ]; then
+            echo "❌ Candidate file not found: $CANDIDATE"
+            echo "COMPILE_SUCCESS=false" >> $GITHUB_ENV
+            exit 1
+          fi
+          
+          # Compiler avec les flags AArch64
+          echo "Compiling with AArch64 toolchain..."
+          clang++-17 -c \
+            -target aarch64-linux-gnu \
+            -O2 \
+            -Xclang -mframe-pointer=non-leaf \
+            -ffp-contract=off \
+            -fno-vectorize \
+            -fno-slp-vectorize \
+            -fno-delete-null-pointer-checks \
+            -std=c++17 \
+            -w \
+            -I /tmp/metroid/switch/include \
+            /tmp/metroid/switch/scripts/$CANDIDATE \
+            -o candidate.o 2> compile_errors.txt
+          
+          if [ $? -eq 0 ]; then
+            echo "✅ Compilation successful"
+            echo "COMPILE_SUCCESS=true" >> $GITHUB_ENV
+            echo "COMPILE_STATUS=COMPILED" >> $GITHUB_ENV
+            
+            # Analyser l'objet compilé
+            echo "Analyzing compiled object..."
+            llvm-nm-17 candidate.o > symbols.txt
+            llvm-objdump-17 -d candidate.o > disassembly.txt
+            
+            echo "Generated:"
+            echo "  - candidate.o"
+            echo "  - symbols.txt"
+            echo "  - disassembly.txt"
+          else
+            echo "❌ Compilation failed"
+            echo "COMPILE_SUCCESS=false" >> $GITHUB_ENV
+            echo "COMPILE_STATUS=FAILED" >> $GITHUB_ENV
+            cat compile_errors.txt
+          fi
+      
+      - name: Analyze structure
+        if: env.COMPILE_SUCCESS == 'true'
+        run: |
+          echo "=== Analyzing compiled structure ==="
+          cd $GITHUB_WORKSPACE/proof
+          
+          # Analyser les symboles
+          echo "Symbols found:"
+          wc -l symbols.txt
+          
+          # Analyser le désassemblage
+          echo "Instructions:"
+          wc -l disassembly.txt
+          
+          # Extraire des métriques simples
+          INSTRUCTION_COUNT=$(grep -c "^[[:space:]]*[0-9a-f]" disassembly.txt || echo "0")
+          BRANCH_COUNT=$(grep -E "\b(b|bl|cbz|cbnz|tbz|tbnz)\b" disassembly.txt | wc -l || echo "0")
+          
+          echo "METRIC_INSTRUCTIONS=$INSTRUCTION_COUNT" >> $GITHUB_ENV
+          echo "METRIC_BRANCHES=$BRANCH_COUNT" >> $GITHUB_ENV
+          
+          echo "Analysis complete:"
+          echo "  Instructions: $INSTRUCTION_COUNT"
+          echo "  Branches: $BRANCH_COUNT"
+      
+      - name: Generate proof
+        run: |
+          echo "=== Generating proof ==="
+          cd $GITHUB_WORKSPACE/proof
+          
+          # Créer le JSON de preuve
+          cat > run.json <<EOF
+          {
+            "request_id": "$REQUEST_ID",
+            "source_sha": "$SOURCE_SHA",
+            "candidate": "$CANDIDATE",
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "compile_status": "$COMPILE_STATUS",
+            "compile_success": $COMPILE_SUCCESS,
+            "metrics": {
+              "instructions": ${METRIC_INSTRUCTIONS:-0},
+              "branches": ${METRIC_BRANCHES:-0}
+            },
+            "verification_level": "compilation",
+            "notes": "Phase A: compilation and structure analysis only. Full EXACT verification requires main.elf."
+          }
+          EOF
+          
+          echo "Proof generated: run.json"
+          cat run.json
+      
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: proof-${{ env.REQUEST_ID }}
+          path: proof/
+          retention-days: 90
+      
+      - name: Move request to completed
+        if: env.REQUEST_FILE != ''
+        run: |
+          echo "=== Moving request to completed ==="
+          
+          # Créer le répertoire completed/exact si nécessaire
+          mkdir -p requests/completed/exact
+          
+          # Déplacer le fichier
+          if [ -f "$REQUEST_FILE" ]; then
+            mv "$REQUEST_FILE" requests/completed/exact/
+            echo "Moved $REQUEST_FILE to requests/completed/exact/"
+          fi
+          
+          # Commit le déplacement
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add requests/
+          git commit -m "chore: move $REQUEST_ID to completed" || echo "No changes to commit"
+          git push || echo "Push failed (may require manual intervention)"
