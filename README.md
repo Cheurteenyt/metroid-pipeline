@@ -1,90 +1,82 @@
-# Metroid Pipeline - External Execution Runner
+# Runner de Verification pour Projets de Decompilation
 
-**GitHub Actions runner for the Metroid Prime Remastered decompilation project.**
+Infrastructure de verification automatisee via GitHub Actions pour des projets de decompilation heberges sur GitLab.
 
-This repository is **strictly an execution runner only**. It contains no source code, no datasets, and no binaries from the main project.
+## Vue d'ensemble
 
-## Architecture
+Ce depot fournit un **runner externe** qui :
+- Clone un projet GitLab a un SHA specifique
+- Execute des tests et/ou des compilations
+- Produit des preuves immuables (artifacts)
+- Archive les requetes traitees
 
-GitLab (cheurteen/metroid) -> GitHub Actions runner -> Proof artifacts
+**Important** : Ce depot ne contient AUCUNE donnee projet (code, binaires, metriques). Toute la connaissance projet reside sur GitLab.
 
-- GitLab: Source of truth (code, tests, manifest). NEVER modified by this runner.
-- GitHub: External runner only. Contains NO source code from GitLab.
-- Artifacts: Immutable proof (run.json, test-results.json, logs).
+## Documentation
 
-## Repository Contents
+### Pour commencer
 
-- `.github/workflows/metroid-smoke.yml` - Smoke test workflow
-- `scripts/` - Runner scripts (parse, generate, check)
-- `requests/pending/` - New test requests
-- `requests/completed/` - Successfully processed requests
-- `requests/failed/` - Failed requests
-- `docs/` - Documentation
+1. **[ARCHITECTURE.md](docs/ARCHITECTURE.md)** : Principes de conception et vue d'ensemble
+2. **[WORKFLOWS.md](docs/WORKFLOWS.md)** : Comment utiliser les workflows smoke et exact
+3. **[OPERATIONS.md](docs/OPERATIONS.md)** : Configuration, tokens, troubleshooting
+4. **[DEVLOG.md](docs/DEVLOG.md)** : Journal technique (problemes rencontres et solutions)
+5. **[PROOF_CONTRACT.md](docs/PROOF_CONTRACT.md)** : Schema des preuves generees
 
-**What this repo does NOT contain:**
-- No source code from GitLab
-- No datasets or binaries
-- No verified manifest
+### Workflows disponibles
 
-## How It Works
+#### Smoke Tests (metroid-smoke.yml)
+Tests de fumee rapides pour valider les scripts Python sans compilation LLVM.
+- Duree : environ 2 minutes
+- Declenchement : Push dans requests/smoke/
+- [Documentation detaillee](docs/WORKFLOWS.md#workflow-smoke-metroid-smokeyml)
 
-1. Create request JSON in `requests/pending/`
-2. Push to GitHub (triggers workflow)
-3. Workflow clones GitLab at exact SHA using secret
-4. Runs 7 smoke tests (pure Python)
-5. Generates proof artifacts
-6. Moves request to `completed/` or `failed/`
+#### Exact Verification (metroid-exact.yml)
+Compilation et analyse structurelle de fichiers C++ avec LLVM 17 + AArch64.
+- Duree : environ 3-5 minutes
+- Declenchement : Push dans requests/exact/
+- [Documentation detaillee](docs/WORKFLOWS.md#workflow-exact-metroid-exactyml)
 
-## Security
+## Utilisation rapide
 
-### Secrets
-- `GITLAB_TOKEN` - Read-only access to GitLab (stored encrypted in GitHub Secrets)
-- No secrets in code or committed to repo
+### Creer une requete smoke
 
-### Token Rotation
-**GitLab token:**
-1. Prefer a fine-grained personal access token scoped to project `cheurteen/metroid`
-2. Grant only `Code -> Download` (needed for git clone/fetch); do not grant Code Push
-3. If using a legacy token, use the comparable minimal scope `read_repository`
-4. Update `GITLAB_TOKEN` secret in GitHub -> Settings -> Secrets
+Ecrire le fichier requests/smoke/smoke-0001.json avec le format JSON documente dans WORKFLOWS.md, puis commit et push.
 
-**GitHub PAT:**
-1. Revoke old token in GitHub -> Settings -> Developer settings -> Personal access tokens
-2. Create new fine-grained token with Contents read/write, Metadata read, Actions read
+Le workflow se declenche automatiquement. Apres environ 2 minutes, consulter l'artifact proof_smoke-0001.
 
-After rotation: Runner continues with new token. No code changes required.
+### Creer une requete exact
 
-## Profiles
+Ecrire le fichier requests/exact/exact-0001.json avec le format JSON documente dans WORKFLOWS.md, puis commit et push.
 
-### Phase 1: Smoke (current)
-- 7 pure Python tests (no LLVM)
-- Result: PASS if all tests pass
-- Does NOT mean decompilation is EXACT
+Apres environ 3-5 minutes, consulter l'artifact proof_exact-0001.
 
-### Phase 2: Exact (future)
-- Opcode-exact verification with LLVM 17
-- Requires main.elf (stored securely, not in this repo)
+## Structure du depot
 
-### Phase 3: Regression (future)
-- Detect regressions between commits
+- .github/workflows/ : Workflows GitHub Actions (metroid-smoke.yml, metroid-exact.yml)
+- requests/ : Requetes de verification (smoke/, exact/, completed/)
+- scripts/ : Scripts auxiliaires (parse_request.py, generate_run_json.py, check_status.py)
+- docs/ : Documentation (ARCHITECTURE.md, WORKFLOWS.md, OPERATIONS.md, DEVLOG.md, PROOF_CONTRACT.md)
 
-## Model Roles
+## Securite
 
-| Model | Role | Commits |
-|-------|------|---------|
-| GPT-5.6 | Analysis and pilot | [GPT-5.6] |
-| GLM 5.2 | Execution with LLVM | [GLM-5.2] |
-| Qwen 3.8 Max | Documentation, audit | [qwen3.8-max] |
+- **Tokens** : Stockes dans GitHub Secrets, jamais dans le code
+- **Permissions** : Minimales (lecture GitLab, ecriture GitHub)
+- **Isolation** : Aucune donnee projet ne transite par ce depot
+- **Rotation** : Documentee dans OPERATIONS.md
 
-## Dependencies
-- Python 3.12, setuptools==69.0.3, capstone==5.0.1, pytest==8.3.2
-- All versions pinned and recorded in run.json
+## Limites et contraintes
 
-## Credits
-- GPT-5.6: Initial architecture
-- GLM 5.2: Execution infrastructure
-- Qwen 3.8 Max: Documentation and coordination
+Voir OPERATIONS.md pour les details sur :
+- Limites GitHub Actions et GitLab CI/CD
+- Procedures de rotation des tokens
+- Troubleshooting des problemes courants
 
-## Links
-- Source: https://gitlab.com/cheurteen/metroid
-- Runner: https://github.com/Cheurteenyt/metroid-pipeline
+## Support
+
+1. Consulter la documentation dans docs/
+2. Consulter le journal technique (DEVLOG.md) pour les problemes connus
+3. Creer une issue dans ce depot
+
+## Licence
+
+Infrastructure de verification. Le projet source (sur GitLab) a sa propre licence.
