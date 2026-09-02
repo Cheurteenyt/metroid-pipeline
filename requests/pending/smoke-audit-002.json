@@ -1,0 +1,6 @@
+{
+  "request_id": "smoke-audit-002",
+  "source_repo": "gitlab.com/cheurteen/metroid",
+  "source_commit": "5e5ab03863817214c6a395981389ac5cab2c3fd3",
+  "profile": "smoke"
+}
