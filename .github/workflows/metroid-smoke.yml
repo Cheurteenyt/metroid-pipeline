@@ -166,6 +166,7 @@ jobs:
       - name: Run smoke tests
         if: steps.detect.outputs.skip != 'true'
         run: |
+          set +e  # Ne pas s'arrêter au premier exit non-zero
           cd /tmp/metroid
           export PYTHONPATH="/tmp/metroid/switch/scripts:$PYTHONPATH"
 
