@@ -231,21 +231,33 @@ jobs:
       - name: Move request to completed or failed
         if: always() && steps.detect.outputs.skip != 'true' && env.REQUEST_FILE != ''
         run: |
+          RUN_JSON="proof/${{ env.REQUEST_ID }}/run.json"
+          RESULT_STATUS="FAIL"
+          if [ -f "$RUN_JSON" ]; then
+            RESULT_STATUS=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("status","FAIL"))' "$RUN_JSON")
+          else
+            echo "::warning::run.json not found, marking request as failed"
+          fi
+          echo "Resolved status from run.json: $RESULT_STATUS"
+          
           if [ -f "${{ env.REQUEST_FILE }}" ]; then
-            if [ "${{ env.STATUS }}" = "PASS" ]; then
+            if [ "$RESULT_STATUS" = "PASS" ]; then
               mkdir -p requests/completed
               git mv "${{ env.REQUEST_FILE }}" requests/completed/ || mv "${{ env.REQUEST_FILE }}" requests/completed/
-              echo "✅ Moved to requests/completed/"
+              echo "Moved to requests/completed/"
             else
               mkdir -p requests/failed
               git mv "${{ env.REQUEST_FILE }}" requests/failed/ || mv "${{ env.REQUEST_FILE }}" requests/failed/
-              echo "❌ Moved to requests/failed/"
+              echo "Moved to requests/failed/"
             fi
             
-            # Commit le déplacement avec GITHUB_TOKEN
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
             git add requests/
-            git commit -m "[bot] ${{ env.REQUEST_ID }}: ${{ env.STATUS }}" || echo "Nothing to commit"
-            git push origin HEAD:main || echo "Push failed (may require manual push)"
+            git commit -m "[bot] ${{ env.REQUEST_ID }}: $RESULT_STATUS" || echo "Nothing to commit"
+            git push origin HEAD:main
           fi
+
+      - name: Final status check
+        if: always() && steps.detect.outputs.skip != 'true'
+        run: python3 scripts/check_status.py
