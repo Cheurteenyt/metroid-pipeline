@@ -98,9 +98,10 @@ def validate_regression_proof(data, comparison):
         return False, errors
     
     # If status is not PASS, validation passes (we accept FAIL/UNKNOWN)
+    # If status is not PASS, validation fails (we reject FAIL/UNKNOWN)
     if status != 'PASS':
         print(f"Status is {status}: {data.get('reason', 'no reason provided')}")
-        return True, []
+        return False, [f'Status is {status}, not PASS']
     
     # For PASS, validate all invariants
     
