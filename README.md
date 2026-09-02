@@ -1,71 +1,89 @@
-# Metroid Pipeline — External Execution Runner
+# Metroid Pipeline - External Execution Runner
 
-This repository provides a **GitHub Actions runner** for the
-[Metroid Prime Remastered decompilation project](https://gitlab.com/cheurteen/metroid).
+**GitHub Actions runner for the Metroid Prime Remastered decompilation project.**
+
+This repository is **strictly an execution runner only**. It contains no source code, no datasets, and no binaries from the main project.
 
 ## Architecture
 
-```
-GitLab (cheurteen/metroid)     ← source of truth
-         │
-         ▼
-GitHub Actions runner          ← external execution
-         │
-         ▼
-proof artifact (run.json)      ← evidence
-```
+GitLab (cheurteen/metroid) -> GitHub Actions runner -> Proof artifacts
 
-## Roles
+- GitLab: Source of truth (code, tests, manifest). NEVER modified by this runner.
+- GitHub: External runner only. Contains NO source code from GitLab.
+- Artifacts: Immutable proof (run.json, test-results.json, logs).
 
-- **GitLab `cheurteen/metroid`**: authoritative source code, verification
-  machinery, and verified manifest. Never modified by the runner.
-- **GitHub `Cheurteenyt/metroid-pipeline`**: external runner only.
-  Executes tests at an exact commit SHA and produces proof artifacts.
-- **GPT-5.6**: analysis and pilot agent. Triggers workflows and reads
-  artifacts. Cannot run local builds.
-- **GLM 5.2**: execution agent. Has local LLVM/AArch64 environment.
-  Bootstrap runner infrastructure and performs actual verification.
+## Repository Contents
 
-## Workflow
+- `.github/workflows/metroid-smoke.yml` - Smoke test workflow
+- `scripts/` - Runner scripts (parse, generate, check)
+- `requests/pending/` - New test requests
+- `requests/completed/` - Successfully processed requests
+- `requests/failed/` - Failed requests
+- `docs/` - Documentation
 
-File: `.github/workflows/metroid-smoke.yml`
+**What this repo does NOT contain:**
+- No source code from GitLab
+- No datasets or binaries
+- No verified manifest
 
-Triggered manually with:
-- `source_commit`: exact 40-char SHA (required, immutable)
-- `profile`: `smoke` (Python-only tests, no LLVM)
+## How It Works
 
-The workflow:
-1. Validates the SHA is a full 40-char hash (rejects branch names)
-2. Checks out the exact SHA from GitLab
-3. Verifies `git rev-parse HEAD == source_commit`
-4. Runs pure Python tests (no LLVM needed)
-5. Produces `proof/run.json` with execution evidence
-6. Uploads `proof/` as a GitHub Actions artifact
-
-## Smoke vs EXACT
-
-A `smoke` PASS means:
-> The requested tests ran and passed at the requested commit.
-
-A `smoke` PASS does **NOT** mean:
-> The decompilation is correct or EXACT.
-
-The `run.json` never contains `EXACT`, `verified`, `semantic`, or `coverage`
-fields for a smoke test. Those concepts belong to `exact_compare.py` and
-`verified_manifest.json` in the GitLab repo.
+1. Create request JSON in `requests/pending/`
+2. Push to GitHub (triggers workflow)
+3. Workflow clones GitLab at exact SHA using secret
+4. Runs 7 smoke tests (pure Python)
+5. Generates proof artifacts
+6. Moves request to `completed/` or `failed/`
 
 ## Security
 
-- No secrets in this repository
-- No GitLab CI pipeline (intentionally disabled)
-- Runner results never automatically modify GitLab
-- Artifacts serve as proof of execution only
+### Secrets
+- `GITLAB_TOKEN` - Read-only access to GitLab (stored encrypted in GitHub Secrets)
+- No secrets in code or committed to repo
 
-## Proof contract
+### Token Rotation
+**GitLab PAT:**
+1. Revoke old token in GitLab -> Settings -> Access Tokens
+2. Create new token with `read_repository` scope
+3. Update `GITLAB_TOKEN` secret in GitHub -> Settings -> Secrets
 
-See `docs/PROOF_CONTRACT.md` for the artifact schema.
+**GitHub PAT:**
+1. Revoke old token in GitHub -> Settings -> Developer settings -> Personal access tokens
+2. Create new fine-grained token with Contents read/write, Metadata read, Actions read
+
+After rotation: Runner continues with new token. No code changes required.
+
+## Profiles
+
+### Phase 1: Smoke (current)
+- 7 pure Python tests (no LLVM)
+- Result: PASS if all tests pass
+- Does NOT mean decompilation is EXACT
+
+### Phase 2: Exact (future)
+- Opcode-exact verification with LLVM 17
+- Requires main.elf (stored securely, not in this repo)
+
+### Phase 3: Regression (future)
+- Detect regressions between commits
+
+## Model Roles
+
+| Model | Role | Commits |
+|-------|------|---------|
+| GPT-5.6 | Analysis and pilot | [GPT-5.6] |
+| GLM 5.2 | Execution with LLVM | [GLM-5.2] |
+| Qwen 3.8 Max | Documentation, audit | [qwen3.8-max] |
+
+## Dependencies
+- Python 3.12, setuptools==69.0.3, capstone==5.0.1, pytest==8.3.2
+- All versions pinned and recorded in run.json
 
 ## Credits
+- GPT-5.6: Initial architecture
+- GLM 5.2: Execution infrastructure
+- Qwen 3.8 Max: Documentation and coordination
 
-Prepared with GPT-5.6
-Execution performed by GLM 5.2
+## Links
+- Source: https://gitlab.com/cheurteen/metroid
+- Runner: https://github.com/Cheurteenyt/metroid-pipeline
