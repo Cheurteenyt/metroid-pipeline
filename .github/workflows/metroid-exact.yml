@@ -44,7 +44,13 @@ jobs:
               CHANGED_FILES=$(git diff --name-only --diff-filter=AM $BEFORE $AFTER -- 'requests/exact/*.json' 2>/dev/null || echo "")
             fi
             
-            FILE_COUNT=$(echo "$CHANGED_FILES" | grep -c '\.json$' || echo "0")
+            # Count changed files (robust version)
+            if [ -z "$CHANGED_FILES" ]; then
+              FILE_COUNT=0
+            else
+              FILE_COUNT=$(echo "$CHANGED_FILES" | grep -c '\.json$' 2>/dev/null || echo "0")
+              FILE_COUNT=$(echo "$FILE_COUNT" | tr -d '\n' | tr -d ' ' | head -1)
+            fi
             
             if [ "$FILE_COUNT" -eq 0 ]; then
               echo "No exact requests found in this push"
