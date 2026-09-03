@@ -1,0 +1,19 @@
+{
+  "schema": "github-write-request/v1",
+  "request_id": "write-test-003",
+  "target_repo": "Cheurteenyt/metroid-pipeline",
+  "target_branch": "ignored",
+  "base_sha": "b3b22831ac8a019d4326525da242d045b02d6f25",
+  "author_model": "GLM 5.3 Flash",
+  "operation": "create",
+  "files": [
+    {
+      "path": "docs/GITLAB_RELAY_DEMO.md",
+      "patch": "# Demo GitLab \u2192 GitHub write relay\n\nCe fichier a \u00e9t\u00e9 cr\u00e9\u00e9 par le write relay (v1.1) \u00e0 partir d'une demande\nd\u00e9pos\u00e9e dans le d\u00e9p\u00f4t GitLab source de v\u00e9rit\u00e9 :\n\n- request_id : write-test-003\n- author_model : GLM 5.3 Flash\n- transport : polling GitHub Actions (requests/github-write/)\n- base_sha : b3b22831ac8a019d4326525da242d045b02d6f25 (HEAD main attendu apr\u00e8s fast-forward de la branche relay-identity)\n- mutation : cr\u00e9ation d'un fichier de documentation (inoffensif, r\u00e9versible)\n\nLa preuve d'ex\u00e9cution est l'artifact GitHub `write-proof-write-test-003`\n(proof/github-write/write-test-003/run.json, sch\u00e9ma github-write-proof/v1).\n"
+    }
+  ],
+  "commit_message": "[GLM-5.3-Flash] real E2E positive demo (GLM 5.3 Flash)",
+  "required_checks": [
+    "python-tests"
+  ]
+}
