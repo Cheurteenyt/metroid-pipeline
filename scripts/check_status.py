@@ -112,18 +112,58 @@ def main():
             print(f"::error::candidate_exact_count ({cand_count}) < baseline ({base_count})")
             valid = False
 
-    # For write profile
+    # For write profile — fail-closed invariants (v1.1)
     elif profile == "write":
         push_confirmed = data.get("push_confirmed", False)
-        tests = data.get("tests", {})
+        tests = data.get("tests", {}) if isinstance(data.get("tests"), dict) else {}
         tp = tests.get("passed", 0)
         tfl = tests.get("failed", 0)
-        
+        te = tests.get("expected", 0)
+        tx = tests.get("executed", 0)
+        stage = data.get("stage", "")
+        base_sha = data.get("base_sha", "")
+        actual_base = data.get("actual_base_sha", "")
+        files_requested = data.get("files_requested", 0)
+        files_changed = data.get("files_changed", [])
+        required = data.get("required_checks", [])
+        checks_exec = data.get("checks_executed", [])
+
+        def _nonneg_int(val):
+            return isinstance(val, int) and not isinstance(val, bool) and val >= 0
+
+        for val, name in [(tp, "tests.passed"), (tfl, "tests.failed"),
+                          (te, "tests.expected"), (tx, "tests.executed"),
+                          (files_requested, "files_requested")]:
+            if not _nonneg_int(val):
+                print(f"::error::{name} must be a non-negative integer, got {val!r}")
+                valid = False
+
         if not push_confirmed:
             print(f"::error::PASS requires push_confirmed=true")
             valid = False
-        if tfl > 0:
+        if stage != "pushed":
+            print(f"::error::PASS requires stage='pushed', got {stage!r}")
+            valid = False
+        if tfl != 0:
             print(f"::error::PASS requires tests_failed=0, got {tfl}")
+            valid = False
+        if te <= 0:
+            print(f"::error::PASS requires tests_expected>0, got {te}")
+            valid = False
+        if tx != te:
+            print(f"::error::PASS requires tests_executed==tests_expected "
+                  f"({tx} != {te})")
+            valid = False
+        if "python-tests" in required and "python-tests" not in checks_exec:
+            print(f"::error::required check 'python-tests' was not executed")
+            valid = False
+        if base_sha and actual_base and base_sha != actual_base:
+            print(f"::error::base_sha != actual_base_sha")
+            valid = False
+        if isinstance(files_changed, list) and files_requested > 0 \
+                and len(files_changed) != files_requested:
+            print(f"::error::files_changed ({len(files_changed)}) != "
+                  f"files_requested ({files_requested})")
             valid = False
 
     if not valid:

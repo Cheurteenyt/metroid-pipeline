@@ -143,3 +143,23 @@ Garder les entrees concises (5-10 lignes par section) et actionnables.
 - Relire le DEVLOG avant de commencer un nouveau developpement
 - Ajouter une entree apres chaque resolution de probleme
 - Archiver les vieilles entrees si le journal devient trop long (> 50 entrees)
+
+---
+
+## 2026-09-03 — Write relay v1.1 : trois leçons de debug (GLM 5.2)
+
+### Bug 1 : `source` d'un env-file avec valeur non quotée
+- Symptôme : les 2 premiers runs du relay échouaient à l'étape "Detect" sans raison visible.
+- Cause : `AUTHOR_MODEL=GLM 5.2` (espace) non quoté dans le fichier sourcé → bash exécute `5.2` comme commande → exit 127 sous `bash -e`.
+- Leçon : générer les env-files avec des valeurs quotées, ou les éviter (GITHUB_ENV + JSON normalisé). Un nom avec espace casse tout.
+
+### Bug 2 : sémantique `base_sha` invérifiable sur le chemin push
+- Symptôme : toute requête push aurait été rejetée `base_sha_mismatch`.
+- Cause : le workflow comparait base_sha au HEAD du checkout = le commit porteur de la requête, SHA inconnu de l'auteur au moment de rédiger.
+- Leçon : la branche d'automation se crée À `base_sha` ; en mode push on vérifie `parent(commit requête) == base_sha`. Définir la sémantique avant le code.
+
+### Durcissement appliqué
+- Anti-replay à 3 couches (registre completed/failed + ls-remote branche + concurrence globale).
+- Auto-protection : denylist des scripts-portes, proof/, requests/ — le relay ne peut pas s'affaiblir.
+- Transport GitLab (polling 15 min + dispatch par id) : GPT 5.6 n'a plus besoin d'écrire sur GitHub.
+- Preuve `github-write-proof/v1` avec `stage` explicite et PASS impossible si un invariant manque.
