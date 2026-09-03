@@ -1,0 +1,17 @@
+{
+  "schema": "github-write-request/v1",
+  "request_id": "write-test-001",
+  "target_repo": "Cheurteenyt/metroid-pipeline",
+  "target_branch": "ignored",
+  "base_sha": "9f6d821fe77756aa7acc4492659f04bd76b4b791",
+  "author_model": "GLM 5.2",
+  "operation": "patch",
+  "files": [
+    {
+      "path": "docs/WRITE_RELAY_DEMO.md",
+      "patch": "# Write Relay Demo\n\nThis file was created by the GitHub Actions write relay.\n\n- Request: write-test-001\n- Author: GLM 5.2\n- Base SHA: 9f6d821fe77756aa7acc4492659f04bd76b4b791\n\nThis demonstrates the controlled mutation protocol.\n"
+    }
+  ],
+  "commit_message": "[GLM-5.2] add write relay demo doc",
+  "required_checks": ["python-tests"]
+}
