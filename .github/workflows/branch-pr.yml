@@ -50,18 +50,32 @@ jobs:
             || { echo "REFUS : branche absente sur origin." >&2; exit 1; }
           echo "Branche de travail : $BRANCH"
 
-      - name: Creer ou reutiliser la PR
-        id: pr
+      - name: Detecter une PR existante
+        id: find
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          EXISTING=$(gh pr list --head "$BRANCH" --base main --state open --json number --jq '.[0].number // ""')
-          if [ -n "$EXISTING" ]; then
-            echo "PR #$EXISTING deja ouverte — reutilisation."
-            echo "number=$EXISTING" >> "$GITHUB_OUTPUT"
-            exit 0
+          if ! OUT=$(gh pr list --head "$BRANCH" --base main --state open --json number --jq '.[0].number // ""' 2>gh-find.err); then
+            {
+              echo "## gh pr list a echoue"
+              echo '```'
+              cat gh-find.err
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            cat gh-find.err >&2
+            exit 1
           fi
+          echo "PR ouverte existante : '${OUT:-aucune}'"
+          echo "existing=$OUT" >> "$GITHUB_OUTPUT"
+
+      - name: Creer la PR si besoin
+        id: create
+        if: steps.find.outputs.existing == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
           SUBJECT=$(git log -1 --format=%s HEAD)
           {
             echo "## Resume"
@@ -86,10 +100,32 @@ jobs:
             echo "- request_id relay : n/a (travail de maintenance hors relay)"
             echo "- Methode de fusion : merge no-ff ; branche supprimee apres fusion."
           } > pr-body.md
-          URL=$(gh pr create --base main --head "$BRANCH" --title "$SUBJECT" --body-file pr-body.md)
+          echo "Corps de PR construit : $(wc -l < pr-body.md) lignes."
+          if ! URL=$(gh pr create --base main --head "$BRANCH" --title "$SUBJECT" --body-file pr-body.md 2>gh-create.err); then
+            {
+              echo "## Echec de creation de PR (gh pr create)"
+              echo '```'
+              cat gh-create.err
+              echo '```'
+              echo "Si le message cite *not permitted to create or approve pull requests* :"
+              echo "Settings -> Actions -> General -> Workflow permissions ->"
+              echo "cocher **Allow GitHub Actions to create and approve pull requests**."
+            } >> "$GITHUB_STEP_SUMMARY"
+            cat gh-create.err >&2
+            exit 1
+          fi
           NUM="${URL##*/}"
           echo "PR creee : $URL"
           echo "number=$NUM" >> "$GITHUB_OUTPUT"
+
+      - name: Resoudre le numero de PR
+        id: pr
+        run: |
+          set -euo pipefail
+          EX="${{ steps.find.outputs.existing }}"
+          CR="${{ steps.create.outputs.number }}"
+          echo "number=${CR:-$EX}" >> "$GITHUB_OUTPUT"
+          echo "PR ciblee : #${CR:-$EX}"
 
       - name: Attendre les checks externes (hors ce workflow)
         env:
