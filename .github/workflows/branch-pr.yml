@@ -23,7 +23,9 @@ concurrency:
 
 jobs:
   open-pr:
-    if: startsWith(github.ref_name, 'automation/glm-5.3-flash/')
+    if: >-
+      startsWith(github.ref_name, 'automation/glm-5.3-flash/')
+      && !contains(github.event.head_commit.message, '[ci-noop]')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -69,11 +71,12 @@ jobs:
           echo "PR ouverte existante : '${OUT:-aucune}'"
           echo "existing=$OUT" >> "$GITHUB_OUTPUT"
 
-      - name: Creer la PR si besoin
+      - name: Creer la PR si besoin (GraphQL puis REST, diagnostic sur branche)
         id: create
         if: steps.find.outputs.existing == ''
         env:
           GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           SUBJECT=$(git log -1 --format=%s HEAD)
@@ -101,21 +104,53 @@ jobs:
             echo "- Methode de fusion : merge no-ff ; branche supprimee apres fusion."
           } > pr-body.md
           echo "Corps de PR construit : $(wc -l < pr-body.md) lignes."
-          if ! URL=$(gh pr create --base main --head "$BRANCH" --title "$SUBJECT" --body-file pr-body.md 2>gh-create.err); then
-            {
-              echo "## Echec de creation de PR (gh pr create)"
-              echo '```'
-              cat gh-create.err
-              echo '```'
-              echo "Si le message cite *not permitted to create or approve pull requests* :"
-              echo "Settings -> Actions -> General -> Workflow permissions ->"
-              echo "cocher **Allow GitHub Actions to create and approve pull requests**."
-            } >> "$GITHUB_STEP_SUMMARY"
+          NUM=""
+          if URL=$(gh pr create --base main --head "$BRANCH" --title "$SUBJECT" --body-file pr-body.md 2>gh-create.err); then
+            NUM="${URL##*/}"
+            echo "PR creee via gh pr create : $URL"
+          else
+            echo "gh pr create (GraphQL) a echoue — tentative REST de secours :" >&2
             cat gh-create.err >&2
-            exit 1
+            if NUM=$(gh api -X POST "repos/$REPO/pulls" \
+                      -f title="$SUBJECT" -f head="$BRANCH" -f base=main \
+                      -F body=@pr-body.md --jq '.number' 2>gh-create-rest.err); then
+              echo "PR creee via REST : #$NUM"
+            else
+              {
+                echo "## Echec de creation de PR"
+                echo '```'
+                cat gh-create.err
+                echo '```'
+                echo "## Echec du canal REST"
+                echo '```'
+                cat gh-create-rest.err
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+              # Diagnostic persistant : commite sur la branche (lisible via git fetch),
+              # message [ci-noop] pour ne pas re-declencher ce workflow.
+              {
+                echo "# Diagnostic branch-pr $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+                echo
+                echo "## gh pr create (GraphQL)"
+                echo '```'
+                cat gh-create.err
+                echo '```'
+                echo "## gh api REST"
+                echo '```'
+                cat gh-create-rest.err
+                echo '```'
+                echo "Piste : Settings -> Actions -> General -> Workflow permissions ->"
+                echo "'Allow GitHub Actions to create and approve pull requests'."
+              } > DIAGNOSTIC_PR.md
+              git config user.name "GLM 5.3 Flash [bot]"
+              git config user.email "glm53@local"
+              git add DIAGNOSTIC_PR.md
+              git commit -m "[ci-noop] diagnostic echec creation PR"
+              git push origin "$BRANCH"
+              echo "Diagnostic commite sur $BRANCH (DIAGNOSTIC_PR.md)." >&2
+              exit 1
+            fi
           fi
-          NUM="${URL##*/}"
-          echo "PR creee : $URL"
           echo "number=$NUM" >> "$GITHUB_OUTPUT"
 
       - name: Resoudre le numero de PR
