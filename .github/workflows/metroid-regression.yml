@@ -367,15 +367,10 @@ jobs:
           # Generate run.json using Python (safe JSON generation)
           if ! python3 $GITHUB_WORKSPACE/scripts/generate_regression_run_json.py; then
             echo "ERROR: Failed to generate run.json"
-            # Create minimal fallback
-            cat > run.json <<EOF
-{
-  "request_id": "$REQUEST_ID",
-  "profile": "regression",
-  "status": "UNKNOWN",
-  "reason": "proof_generation_failed"
-}
-EOF
+            # Create minimal fallback (echo JSON sur une ligne : un heredoc
+            # avec corps hors du bloc scalaire YAML cassait la syntaxe du
+            # fichier — "Invalid workflow file ... line 372" sur chaque push)
+            echo '{"request_id": "'"${REQUEST_ID}"'", "profile": "regression", "status": "UNKNOWN", "reason": "proof_generation_failed"}' > run.json
           fi
           
           echo "Proof generated: run.json"
