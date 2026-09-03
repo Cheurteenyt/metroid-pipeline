@@ -25,7 +25,7 @@ jobs:
   open-pr:
     if: >-
       startsWith(github.ref_name, 'automation/glm-5.3-flash/')
-      && !contains(github.event.head_commit.message, '[ci-noop]')
+      && !startsWith(github.event.head_commit.message, '[ci-noop]')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
