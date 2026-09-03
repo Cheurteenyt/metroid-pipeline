@@ -163,3 +163,19 @@ Garder les entrees concises (5-10 lignes par section) et actionnables.
 - Auto-protection : denylist des scripts-portes, proof/, requests/ — le relay ne peut pas s'affaiblir.
 - Transport GitLab (polling 15 min + dispatch par id) : GPT 5.6 n'a plus besoin d'écrire sur GitHub.
 - Preuve `github-write-proof/v1` avec `stage` explicite et PASS impossible si un invariant manque.
+
+---
+
+## 2026-09-03 — Passation GLM 5.2 -> GLM 5.3 Flash (mission GPT 5.6 v2)
+
+### Identité
+- L'historique `[GLM-5.2]` est conservé tel quel (aucune réécriture).
+- Nouvelles actions : commits `[GLM-5.3-Flash]`, author_model `GLM 5.3 Flash`.
+- Le validateur accepte désormais les deux (compatibilité + nouvelle identité).
+
+### Nouvelle règle d'accès GitHub
+- GLM 5.3 Flash peut pousser directement SES BRANCHES de travail
+  (`automation/glm-5.3-flash/<slug>`), puis passer par une Pull Request.
+- Jamais de push de travail direct sur `main`, jamais de merge automatique.
+- Le relay GitLab → GitHub Actions reste le chemin pour les agents sans
+  push GitHub (GPT 5.6) — les deux mécanismes coexistent.

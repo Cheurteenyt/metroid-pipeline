@@ -4,7 +4,7 @@
   "target_repo": "Cheurteenyt/metroid-pipeline",
   "target_branch": "ignored",
   "base_sha": "0000000000000000000000000000000000000000",
-  "author_model": "GLM 5.2",
+  "author_model": "GLM 5.3 Flash",
   "operation": "patch",
   "files": [
     {
@@ -12,6 +12,8 @@
       "patch": "# Write Relay Demo\n\nThis file was created by the write relay.\n"
     }
   ],
-  "commit_message": "[GLM-5.2] add write relay demo doc",
-  "required_checks": ["python-tests"]
+  "commit_message": "[GLM-5.3-Flash] add write relay demo doc",
+  "required_checks": [
+    "python-tests"
+  ]
 }

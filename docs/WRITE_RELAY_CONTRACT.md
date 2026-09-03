@@ -10,7 +10,7 @@ et push la branche. Le merge dans `main` reste manuel (humain).
 ## 1. Architecture
 
 ```
-GPT 5.6 / qwen3.8-max / GLM 5.2 (ou humain)
+GPT 5.6 / qwen3.8-max / GLM 5.2 / GLM 5.3 Flash (ou humain)
    |
    | dépose requests/github-write/<id>.json        (GitLab, append-only)
    v
@@ -82,7 +82,9 @@ Le `patch` est le **contenu complet** du fichier cible (pas un diff unifié).
 1. `schema` exactement `github-write-request/v1`.
 2. `request_id` : `[a-zA-Z0-9_-]{1,64}`, non vide, `unknown` réservé.
 3. `target_repo` exactement `Cheurteenyt/metroid-pipeline`.
-4. `author_model` ∈ `GPT 5.6` | `qwen3.8-max` | `GLM 5.2`.
+4. `author_model` ∈ `GPT 5.6` | `qwen3.8-max` | `GLM 5.2` | `GLM 5.3 Flash`
+   (les trois premiers conservés pour compatibilité historique ; les
+   nouvelles actions de GLM 5.3 Flash utilisent cette identité).
 5. `base_sha` : exactement 40 hex minuscules ; existence + correspondance
    vérifiées par le workflow (§6).
 6. `operation` ∈ `patch` | `create` | `delete` :
@@ -107,8 +109,9 @@ Le `patch` est le **contenu complet** du fichier cible (pas un diff unifié).
 8. Tailles : ≤ 10 000 octets/fichier, ≤ 50 000 octets total,
    ≤ 2 000 lignes total ; pas d'octet NUL.
 9. `commit_message` : doit commencer par le préfixe du modèle
-   (`[GPT-5.6]` / `[qwen3.8-max]` / `[GLM-5.2]`), avoir un sujet, puis est
-   normalisé sur une ligne (le workflow l'utilise tel quel — jamais brut).
+   (`[GPT-5.6]` / `[qwen3.8-max]` / `[GLM-5.2]` / `[GLM-5.3-Flash]`), avoir un
+   sujet, puis est normalisé sur une ligne (le workflow l'utilise tel quel —
+   jamais brut).
 10. `required_checks` : uniquement `python-tests` (rejet fail-closed de toute
     valeur inconnue — une exigence non exécutable est un rejet, pas un
     avertissement).

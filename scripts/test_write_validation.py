@@ -172,10 +172,16 @@ def test_validator_positives():
     check("model prefix derived", norm["model_prefix"] == "[GLM-5.2]")
     for model, prefix in (("GPT 5.6", "[GPT-5.6]"),
                           ("qwen3.8-max", "[qwen3.8-max]"),
-                          ("GLM 5.2", "[GLM-5.2]")):
+                          ("GLM 5.2", "[GLM-5.2]"),
+                          ("GLM 5.3 Flash", "[GLM-5.3-Flash]")):
         v, e, n = validate(make_request(
             author_model=model, commit_message=f"{prefix} ok subject"))
         check(f"model {model} accepted with its prefix", v, str(e[:1]))
+    v, _, n = validate(make_request(
+        author_model="GLM 5.3 Flash",
+        commit_message="[GLM-5.3-Flash] identity handover test"))
+    check("GLM 5.3 Flash derives automation/glm-5.3-flash/<id>",
+          v and n["target_branch"].startswith("automation/glm-5.3-flash/"))
     v, _, _ = validate(make_request(target_branch=None))
     check("target_branch optional", v)
     v, _, n = validate(make_request(operation="create",

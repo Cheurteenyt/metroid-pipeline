@@ -21,17 +21,23 @@ import sys
 SCHEMA = "github-write-request/v1"
 TARGET_REPO = "Cheurteenyt/metroid-pipeline"
 
-# Models allowed to submit requests (mission GPT 5.6 — unchanged)
-ALLOWED_MODELS = ("GPT 5.6", "qwen3.8-max", "GLM 5.2")
+# Models allowed to submit requests.
+# GPT 5.6 / qwen3.8-max / GLM 5.2: mission GPT 5.6 (kept for compatibility).
+# GLM 5.3 Flash: current implementer identity (mission
+# MISSION_GLM_5.3_FLASH_GITHUB_RELAY_FINAL.md §0 — historical GLM 5.2
+# requests must keep working, new actions use GLM 5.3 Flash).
+ALLOWED_MODELS = ("GPT 5.6", "qwen3.8-max", "GLM 5.2", "GLM 5.3 Flash")
 MODEL_PREFIX = {
     "GPT 5.6": "[GPT-5.6]",
     "qwen3.8-max": "[qwen3.8-max]",
     "GLM 5.2": "[GLM-5.2]",
+    "GLM 5.3 Flash": "[GLM-5.3-Flash]",
 }
 MODEL_SLUG = {
     "GPT 5.6": "gpt-5.6",
     "qwen3.8-max": "qwen3.8-max",
     "GLM 5.2": "glm-5.2",
+    "GLM 5.3 Flash": "glm-5.3-flash",
 }
 
 OPERATIONS = ("patch", "create", "delete")
