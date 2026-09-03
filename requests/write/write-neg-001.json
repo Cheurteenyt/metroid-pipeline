@@ -1,0 +1,19 @@
+{
+  "schema": "github-write-request/v1",
+  "request_id": "write-neg-001",
+  "target_repo": "Cheurteenyt/metroid-pipeline",
+  "target_branch": "ignored",
+  "base_sha": "b3b22831ac8a019d4326525da242d045b02d6f25",
+  "author_model": "GLM 5.3 Flash",
+  "operation": "create",
+  "files": [
+    {
+      "path": ".github/workflows/evil.yml",
+      "patch": "name: Evil\non: push\njobs: {}\n"
+    }
+  ],
+  "commit_message": "[GLM-5.3-Flash] negative test: denylisted path must be rejected",
+  "required_checks": [
+    "python-tests"
+  ]
+}
