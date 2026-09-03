@@ -1,0 +1,17 @@
+{
+  "schema": "github-write-request/v1",
+  "request_id": "sample-001",
+  "target_repo": "Cheurteenyt/metroid-pipeline",
+  "target_branch": "ignored",
+  "base_sha": "0000000000000000000000000000000000000000",
+  "author_model": "GLM 5.2",
+  "operation": "patch",
+  "files": [
+    {
+      "path": "docs/WRITE_RELAY_DEMO.md",
+      "patch": "# Write Relay Demo\n\nThis file was created by the write relay.\n"
+    }
+  ],
+  "commit_message": "[GLM-5.2] add write relay demo doc",
+  "required_checks": ["python-tests"]
+}

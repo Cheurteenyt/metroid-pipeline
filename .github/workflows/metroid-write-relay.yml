@@ -1,0 +1,252 @@
+name: Metroid Write Relay
+
+on:
+  push:
+    paths:
+      - 'requests/write/*.json'
+  workflow_dispatch:
+    inputs:
+      request_file:
+        description: 'Path to write request JSON'
+        required: true
+        type: string
+
+concurrency:
+  group: write-relay-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  write-relay:
+    runs-on: ubuntu-latest
+    env:
+      REQUEST_ID: ""
+      AUTHOR_MODEL: ""
+      BASE_SHA: ""
+      ACTUAL_BASE_SHA: ""
+      TARGET_BRANCH: ""
+      RESULT_SHA: ""
+      FILES_CHANGED: "[]"
+      TESTS_EXPECTED: "0"
+      TESTS_EXECUTED: "0"
+      TESTS_PASSED: "0"
+      TESTS_FAILED: "0"
+      PUSH_CONFIRMED: "false"
+      FAIL_REASON: ""
+    steps:
+      - name: Checkout pipeline repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Detect write request
+        id: detect
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            REQUEST_FILE="${{ inputs.request_file }}"
+          else
+            CHANGED=$(git diff --name-only HEAD~1 HEAD -- 'requests/write/*.json' 2>/dev/null || true)
+            COUNT=$(echo "$CHANGED" | grep -c '\.json$' || true)
+            if [ -z "$CHANGED" ] || [ "$COUNT" -eq 0 ]; then
+              echo "skip=true" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            if [ "$COUNT" -gt 1 ]; then
+              echo "FAIL_REASON=multiple_write_requests" >> $GITHUB_ENV
+              echo "skip=false" >> $GITHUB_OUTPUT
+              exit 1
+            fi
+            REQUEST_FILE=$(echo "$CHANGED" | head -1)
+          fi
+          
+          if [ ! -f "$REQUEST_FILE" ]; then
+            echo "FAIL_REASON=request_file_not_found" >> $GITHUB_ENV
+            echo "skip=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          echo "Request file: $REQUEST_FILE"
+          
+          # Validate the request
+          python3 scripts/validate_write_request.py "$REQUEST_FILE" > /tmp/validated.json 2>/tmp/validation_errors.txt
+          if [ $? -ne 0 ]; then
+            echo "FAIL_REASON=validation_failed" >> $GITHUB_ENV
+            cat /tmp/validation_errors.txt
+            echo "skip=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          # Extract validated fields
+          python3 -c "
+          import json
+          d = json.load(open('/tmp/validated.json'))
+          # Skip the 'VALID' line
+          " 2>/dev/null || true
+          
+          # Parse the normalized request
+          python3 -c "
+          import json, sys
+          lines = open('/tmp/validated.json').readlines()
+          # Find the JSON block (starts after 'VALID' line)
+          json_start = 0
+          for i, line in enumerate(lines):
+              if line.strip().startswith('{'):
+                  json_start = i
+                  break
+          data = json.loads(''.join(lines[json_start:]))
+          print(f'REQUEST_ID={data[\"request_id\"]}')
+          print(f'AUTHOR_MODEL={data[\"author_model\"]}')
+          print(f'BASE_SHA={data[\"base_sha\"]}')
+          print(f'TARGET_BRANCH={data[\"target_branch\"]}')
+          " > /tmp/write_env.sh
+          source /tmp/write_env.sh
+          
+          echo "REQUEST_ID=$REQUEST_ID" >> $GITHUB_ENV
+          echo "AUTHOR_MODEL=$AUTHOR_MODEL" >> $GITHUB_ENV
+          echo "BASE_SHA=$BASE_SHA" >> $GITHUB_ENV
+          echo "TARGET_BRANCH=$TARGET_BRANCH" >> $GITHUB_ENV
+          echo "skip=false" >> $GITHUB_OUTPUT
+
+      - name: Verify base SHA exists and matches
+        if: steps.detect.outputs.skip != 'true'
+        run: |
+          # Verify the SHA exists in the repo
+          if ! git cat-file -e ${{ env.BASE_SHA }} 2>/dev/null; then
+            echo "FAIL_REASON=base_sha_not_found" >> $GITHUB_ENV
+            exit 1
+          fi
+          
+          ACTUAL=$(git rev-parse HEAD)
+          echo "ACTUAL_BASE_SHA=$ACTUAL" >> $GITHUB_ENV
+          
+          if [ "$ACTUAL" != "${{ env.BASE_SHA }}" ]; then
+            echo "FAIL_REASON=base_sha_mismatch" >> $GITHUB_ENV
+            echo "Expected: ${{ env.BASE_SHA }}"
+            echo "Actual: $ACTUAL"
+            exit 1
+          fi
+          echo "Base SHA verified"
+
+      - name: Create automation branch
+        if: steps.detect.outputs.skip != 'true'
+        run: |
+          git checkout -b ${{ env.TARGET_BRANCH }}
+          echo "Created branch: ${{ env.TARGET_BRANCH }}"
+
+      - name: Apply validated patches
+        if: steps.detect.outputs.skip != 'true'
+        run: |
+          python3 scripts/apply_write_patch.py . /tmp/validated.json
+          
+          # Record changed files
+          CHANGED=$(git diff --name-only HEAD)
+          echo "FILES_CHANGED=$(echo "$CHANGED" | python3 -c "import json,sys; print(json.dumps(sys.stdin.read().strip().split(chr(10))) if sys.stdin.read().strip() else '[]')")" >> $GITHUB_ENV
+          
+          # Show diff
+          git diff --stat
+          git add -A
+
+      - name: Set up Python
+        if: steps.detect.outputs.skip != 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        if: steps.detect.outputs.skip != 'true'
+        run: pip install capstone pytest
+
+      - name: Run project tests
+        if: steps.detect.outputs.skip != 'true'
+        run: |
+          TE=0; TX=0; TP=0; TFL=0
+          
+          # Run any test files that exist
+          for t in scripts/test_*.py; do
+            if [ -f "$t" ]; then
+              TE=$((TE+1)); TX=$((TX+1))
+              if PYTHONPATH=scripts pytest "$t" -q >> /tmp/test_stdout.txt 2>> /tmp/test_stderr.txt; then
+                TP=$((TP+1))
+              else
+                TFL=$((TFL+1))
+              fi
+            fi
+          done
+          
+          echo "TESTS_EXPECTED=$TE" >> $GITHUB_ENV
+          echo "TESTS_EXECUTED=$TX" >> $GITHUB_ENV
+          echo "TESTS_PASSED=$TP" >> $GITHUB_ENV
+          echo "TESTS_FAILED=$TFL" >> $GITHUB_ENV
+          
+          echo "Tests: expected=$TE executed=$TX passed=$TP failed=$TFL"
+          
+          if [ $TFL -gt 0 ]; then
+            echo "FAIL_REASON=tests_failed" >> $GITHUB_ENV
+            exit 1
+          fi
+
+      - name: Commit and push
+        if: steps.detect.outputs.skip != 'true'
+        run: |
+          git config user.name "${{ env.AUTHOR_MODEL }}"
+          git config user.email "automation@metroid-pipeline"
+          
+          # Read commit message from validated request
+          COMMIT_MSG=$(python3 -c "
+          import json
+          lines = open('/tmp/validated.json').readlines()
+          json_start = 0
+          for i, line in enumerate(lines):
+              if line.strip().startswith('{'):
+                  json_start = i
+                  break
+          data = json.loads(''.join(lines[json_start:]))
+          print(data['commit_message'])
+          ")
+          
+          git commit -m "$COMMIT_MSG"
+          
+          if git push origin ${{ env.TARGET_BRANCH }} 2>&1; then
+            echo "PUSH_CONFIRMED=true" >> $GITHUB_ENV
+            RESULT_SHA=$(git rev-parse HEAD)
+            echo "RESULT_SHA=$RESULT_SHA" >> $GITHUB_ENV
+            echo "Push succeeded: $RESULT_SHA"
+          else
+            echo "FAIL_REASON=push_failed" >> $GITHUB_ENV
+            exit 1
+          fi
+
+      - name: Generate write proof
+        if: always() && steps.detect.outputs.skip != 'true'
+        run: python3 scripts/generate_write_proof.py
+
+      - name: Upload proof artifact
+        if: always() && steps.detect.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: write-proof-${{ env.REQUEST_ID }}
+          path: proof/
+          retention-days: 30
+
+      - name: Final status check
+        if: always() && steps.detect.outputs.skip != 'true'
+        run: |
+          python3 -c "
+          import json, sys, glob, os
+          rid = os.environ.get('REQUEST_ID', 'unknown')
+          path = f'proof/github-write/{rid}/run.json'
+          if not os.path.exists(path):
+              paths = glob.glob('proof/*/run.json')
+              if not paths:
+                  print('::error::No proof generated')
+                  sys.exit(1)
+              path = paths[0]
+          with open(path) as f:
+              data = json.load(f)
+          status = data.get('status', 'FAIL')
+          print(f'Write relay status: {status}')
+          if status != 'PASS':
+              print(f\"::error::Status is {status} ({data.get('fail_reason','')})\")
+              sys.exit(1)
+          print('PASS confirmed')
+          "
