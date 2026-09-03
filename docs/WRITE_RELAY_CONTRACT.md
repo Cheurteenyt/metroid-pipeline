@@ -186,7 +186,7 @@ Erreur d'application → aucun push. Le job passe en rouge sur tout rejet/échec
   "requested_source_commit": "<head GitLab au fetch>",
   "request_file_sha256": "...",
   "base_sha": "...", "actual_base_sha": "...", "result_sha": "...",
-  "branch": "automation/gpt-5.6/...",
+  "branch": "automation/gpt-5-6/...",
   "operation": "create",
   "files_requested": 1,
   "files_changed": ["docs/example.md"],
@@ -254,9 +254,14 @@ relay (les suppressions sont exclues du détection `--diff-filter=ACMR`).
 * **Requête push-side non identifiable** (JSON cassé) : rejetée et prouvée
   (`unidentified-<run_id>`) mais non enregistrable au registre (pas d'id
   fiable) ; le fichier reste sur `main` jusqu'à nettoyage humain.
-* **Merge manuel** : la branche d'automation n'est pas mergée automatiquement
-  (v1 : `GPT request → branche + preuve`) ; la revue humaine reste le verrou
-  final.
+* **Merge automatique sous conditions** (depuis la v2 de la politique de
+  branches) : une branche PASS `automation/<model-slug>/<request_id>` est
+  traitée par `.github/workflows/branch-pr.yml` (partagé par tous les
+  modèles) : PR vers `main` → check `pr-tests` (suite du dépôt) → merge
+  no-ff uniquement si tous les checks sont verts et si le SHA de head de la
+  PR est toujours celui validé (anti-course) → suppression de la branche.
+  Tout échec ⇒ pas de merge, la PR reste ouverte (fail-closed). Voir
+  `docs/BRANCH_POLICY.md`.
 * **Tests porte** : les nouveaux fichiers `scripts/test_*.py` peuvent être
   ajoutés via le relay (bruit possible) mais jamais les fichiers-portes
   existants (denylist).

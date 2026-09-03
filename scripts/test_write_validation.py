@@ -167,8 +167,8 @@ def test_validator_positives():
     ok = check("validator accepts canonical valid request", valid, str(errors))
     if not ok:
         return
-    check("branch derived automation/glm-5.2/test-001",
-          norm["target_branch"] == "automation/glm-5.2/test-001")
+    check("branch derived automation/glm-5-2/test-001",
+          norm["target_branch"] == "automation/glm-5-2/test-001")
     check("model prefix derived", norm["model_prefix"] == "[GLM-5.2]")
     for model, prefix in (("GPT 5.6", "[GPT-5.6]"),
                           ("qwen3.8-max", "[qwen3.8-max]"),
@@ -180,8 +180,8 @@ def test_validator_positives():
     v, _, n = validate(make_request(
         author_model="GLM 5.3 Flash",
         commit_message="[GLM-5.3-Flash] identity handover test"))
-    check("GLM 5.3 Flash derives automation/glm-5.3-flash/<id>",
-          v and n["target_branch"].startswith("automation/glm-5.3-flash/"))
+    check("GLM 5.3 Flash derives automation/glm-5-3-flash/<id>",
+          v and n["target_branch"].startswith("automation/glm-5-3-flash/"))
     v, _, _ = validate(make_request(target_branch=None))
     check("target_branch optional", v)
     v, _, n = validate(make_request(operation="create",
@@ -313,7 +313,7 @@ def _proof(env_overrides, validation=None, apply_result=None, test_result=None):
 FULL_GOOD = {
     "REQUEST_ID": "write-x", "AUTHOR_MODEL": "GLM 5.2",
     "STAGE": "pushed", "BASE_SHA": "a" * 40, "ACTUAL_BASE_SHA": "a" * 40,
-    "RESULT_SHA": "b" * 40, "TARGET_BRANCH": "automation/glm-5.2/write-x",
+    "RESULT_SHA": "b" * 40, "TARGET_BRANCH": "automation/glm-5-2/write-x",
     "PUSH_CONFIRMED": "true", "SOURCE": "gitlab", "OPERATION": "create",
 }
 
@@ -401,7 +401,7 @@ def test_check_status_write_profile():
         "schema": "github-write-proof/v1", "profile": "write",
         "request_id": "cs-ok", "author_model": "GLM 5.2",
         "base_sha": "a" * 40, "actual_base_sha": "a" * 40,
-        "result_sha": "b" * 40, "branch": "automation/glm-5.2/cs-ok",
+        "result_sha": "b" * 40, "branch": "automation/glm-5-2/cs-ok",
         "files_requested": 1, "files_changed": ["docs/test.md"],
         "required_checks": ["python-tests"],
         "checks_executed": ["python-tests"],

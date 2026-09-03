@@ -1,9 +1,25 @@
-name: Branch PR Automation (GLM 5.3 Flash)
+name: Branch PR Automation (all models)
 
-# Politique de branches (docs/BRANCH_POLICY.md) :
-#   une tache = une branche temporaire automation/glm-5.3-flash/<task-id>
-#   -> PR automatique -> merge apres checks -> suppression de la branche.
-# Fail-closed : si un check echoue, PAS de merge (PR laissee ouverte).
+# Politique de branches (docs/BRANCH_POLICY.md) — v2 main-only, TOUS modèles :
+#   une tache = une branche temporaire automation/<model-slug>/<task-id>
+#   -> push -> PR vers main -> checks -> merge no-ff -> suppression de branche.
+#
+# Namespaces autorisés (tout le reste est REFUSÉ, fail-closed) :
+#   automation/gpt-5-6/*
+#   automation/qwen-3-8-max/*
+#   automation/glm-5-2/*
+#   automation/glm-5-3-flash/*
+#
+# Invariants appliqués (mission GPT 5.6 "FINAL HARDENING") :
+#   - PR obligatoire : réutilisation de la PR ouverte existante, jamais 2 PR
+#     pour la même branche ; la PR doit cibler main.
+#   - "0 check" n'est jamais une validation : le job pr-tests exécute la suite
+#     de tests du dépôt sur le head poussé — toute PR a donc au moins un check.
+#   - Anti-course : le SHA de head de la PR doit être exactement le SHA dont
+#     les checks viennent d'être validés, sinon STOP sans merge.
+#   - Fail-closed : check en échec, timeout, ou head déplacé => PAS de merge ;
+#     la PR reste ouverte, la branche reste disponible (correction sur place).
+#
 # Ce workflow ne modifie aucun script-porte du write relay.
 
 on:
@@ -17,19 +33,48 @@ permissions:
   checks: read
   actions: read
 
+env:
+  WAIT_CHECKS_SECONDS: '300'
+  STABILIZE_SECONDS: '45'
+
 concurrency:
   group: branch-pr-${{ github.ref_name }}
   cancel-in-progress: false
 
 jobs:
-  open-pr:
+  pr-tests:
+    name: pr-tests
     if: >-
-      startsWith(github.ref_name, 'automation/glm-5.3-flash/')
+      startsWith(github.ref_name, 'automation/')
       && !startsWith(github.event.head_commit.message, '[ci-noop]')
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
+    steps:
+      - name: Checkout complet
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Installer les dépendances épinglées (identiques au relay)
+        run: pip install capstone==5.0.1 pytest==8.3.2
+
+      - name: Suite de tests du dépôt (check réel sur le head poussé)
+        run: |
+          set -euo pipefail
+          python3 -m compileall -q scripts/
+          python3 scripts/test_write_validation.py
+
+  open-pr:
+    name: open-pr
+    needs: pr-tests
+    if: >-
+      always()
+      && !startsWith(github.event.head_commit.message, '[ci-noop]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       BRANCH: ${{ github.ref_name }}
+      REPO: ${{ github.repository }}
     steps:
       - name: Checkout complet
         uses: actions/checkout@v4
@@ -37,7 +82,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
-      - name: Garde-fous
+      - name: Garde-fous (namespace autorisé, hors main, branche présente)
         run: |
           set -euo pipefail
           if [ "$BRANCH" = "main" ]; then
@@ -45,163 +90,176 @@ jobs:
             exit 1
           fi
           case "$BRANCH" in
-            automation/glm-5.3-flash/*) ;;
-            *) echo "REFUS : namespace non autorise ($BRANCH)." >&2; exit 1 ;;
+            automation/gpt-5-6/*|automation/qwen-3-8-max/*|automation/glm-5-2/*|automation/glm-5-3-flash/*) ;;
+            *) echo "REFUS : namespace non autorisé ($BRANCH)." >&2
+               echo "Namespaces valides : automation/{gpt-5-6|qwen-3-8-max|glm-5-2|glm-5-3-flash}/<task-id>." >&2
+               exit 1 ;;
           esac
-          git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null \
-            || { echo "REFUS : branche absente sur origin." >&2; exit 1; }
-          echo "Branche de travail : $BRANCH"
-
-      - name: Detecter une PR existante
-        id: find
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          if ! OUT=$(gh pr list --head "$BRANCH" --base main --state open --json number --jq '.[0].number // ""' 2>gh-find.err); then
-            {
-              echo "## gh pr list a echoue"
-              echo '```'
-              cat gh-find.err
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-            cat gh-find.err >&2
+          TASK_ID="${BRANCH##*/}"
+          if [ -z "$TASK_ID" ]; then
+            echo "REFUS : task-id vide ($BRANCH)." >&2
             exit 1
           fi
-          echo "PR ouverte existante : '${OUT:-aucune}'"
-          echo "existing=$OUT" >> "$GITHUB_OUTPUT"
+          git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null \
+            || { echo "REFUS : branche absente sur origin." >&2; exit 1; }
+          echo "Branche de travail : $BRANCH (task-id : $TASK_ID)"
 
-      - name: Creer la PR si besoin (GraphQL puis REST, diagnostic sur branche)
-        id: create
-        if: steps.find.outputs.existing == ''
+      - name: Ouvrir ou réutiliser la PR vers main
         env:
           GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          SUBJECT=$(git log -1 --format=%s HEAD)
-          {
-            echo "## Resume"
-            echo
-            git log -1 --format=%b HEAD
-            echo
-            echo "## Fichiers touches"
-            echo '```'
-            git diff --name-status origin/main...HEAD
-            echo '```'
-            echo
-            echo "## Tests executes"
-            echo "- Validation locale avant push (revue du diff, syntaxe, aucun secret)."
-            echo "- Porte de fusion : checks CI de cette PR (fail-closed)."
-            echo
-            echo "## Impact sur les proofs"
-            echo "- Aucun changement des scripts-portes du relay ni du schema github-write-proof/v1."
-            echo
-            echo "## Provenance"
-            echo "- Auteur du modele : GLM 5.3 Flash"
-            echo "- Branche : \`$BRANCH\` -> base : \`main\`"
-            echo "- request_id relay : n/a (travail de maintenance hors relay)"
-            echo "- Methode de fusion : merge no-ff ; branche supprimee apres fusion."
-          } > pr-body.md
-          echo "Corps de PR construit : $(wc -l < pr-body.md) lignes."
-          NUM=""
-          if URL=$(gh pr create --base main --head "$BRANCH" --title "$SUBJECT" --body-file pr-body.md 2>gh-create.err); then
-            NUM="${URL##*/}"
-            echo "PR creee via gh pr create : $URL"
-          else
-            echo "gh pr create (GraphQL) a echoue — tentative REST de secours :" >&2
-            cat gh-create.err >&2
-            if NUM=$(gh api -X POST "repos/$REPO/pulls" \
-                      -f title="$SUBJECT" -f head="$BRANCH" -f base=main \
-                      -F body=@pr-body.md --jq '.number' 2>gh-create-rest.err); then
-              echo "PR creee via REST : #$NUM"
+          STATE=$(gh pr list --head "$BRANCH" --state open \
+                    --json number,baseRefName 2>gh-find.err) \
+            || { { echo "## gh pr list a échoué"; echo '```'; cat gh-find.err; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+                  cat gh-find.err >&2; exit 1; }
+          NUM=$(printf '%s' "$STATE" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d[0]["number"] if d else "")')
+          BASE=$(printf '%s' "$STATE" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d[0]["baseRefName"] if d else "")')
+          if [ -n "$NUM" ] && [ "$BASE" != "main" ]; then
+            echo "REFUS : PR #$NUM existante pour $BRANCH mais base='$BASE' (main requis)." >&2
+            exit 1
+          fi
+          echo "PR ouverte existante : '${NUM:-aucune}' (base : ${BASE:-n/a})"
+          if [ -z "$NUM" ]; then
+            SUBJECT=$(git log -1 --format=%s HEAD)
+            {
+              echo "## Resume"
+              echo
+              git log -1 --format=%b HEAD
+              echo
+              echo "## Fichiers touches"
+              echo '```'
+              git diff --name-status origin/main...HEAD
+              echo '```'
+              echo
+              echo "## Tests executes"
+              echo "- Check pr-tests (suite du depot) sur le head pousse, fail-closed."
+              echo
+              echo "## Impact sur les proofs"
+              echo "- Aucun changement des scripts-portes du relay ni du schema github-write-proof/v1."
+              echo
+              echo "## Provenance"
+              echo "- Branche : \`$BRANCH\` -> base : \`main\` (workflow tous modeles)."
+              echo "- Methode de fusion : merge no-ff ; branche supprimee apres fusion."
+            } > pr-body.md
+            if URL=$(gh pr create --base main --head "$BRANCH" \
+                     --title "$SUBJECT" --body-file pr-body.md 2>gh-create.err); then
+              NUM="${URL##*/}"
+              echo "PR creee via gh pr create : $URL"
             else
-              {
-                echo "## Echec de creation de PR"
-                echo '```'
-                cat gh-create.err
-                echo '```'
-                echo "## Echec du canal REST"
-                echo '```'
-                cat gh-create-rest.err
-                echo '```'
-              } >> "$GITHUB_STEP_SUMMARY"
-              # Diagnostic persistant : commite sur la branche (lisible via git fetch),
-              # message [ci-noop] pour ne pas re-declencher ce workflow.
-              {
-                echo "# Diagnostic branch-pr $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-                echo
-                echo "## gh pr create (GraphQL)"
-                echo '```'
-                cat gh-create.err
-                echo '```'
-                echo "## gh api REST"
-                echo '```'
-                cat gh-create-rest.err
-                echo '```'
-                echo "Piste : Settings -> Actions -> General -> Workflow permissions ->"
-                echo "'Allow GitHub Actions to create and approve pull requests'."
-              } > DIAGNOSTIC_PR.md
-              git config user.name "GLM 5.3 Flash [bot]"
-              git config user.email "glm53@local"
-              git add DIAGNOSTIC_PR.md
-              git commit -m "[ci-noop] diagnostic echec creation PR"
-              git push origin "$BRANCH"
-              echo "Diagnostic commite sur $BRANCH (DIAGNOSTIC_PR.md)." >&2
-              exit 1
+              echo "gh pr create (GraphQL) a échoué — tentative REST de secours :" >&2
+              cat gh-create.err >&2
+              if NUM=$(gh api -X POST "repos/$REPO/pulls" \
+                        -f title="$SUBJECT" -f head="$BRANCH" -f base=main \
+                        -F body=@pr-body.md 2>gh-create-rest.err \
+                        | python3 -c 'import json,sys; print(json.load(sys.stdin)["number"])'); then
+                echo "PR creee via REST : #$NUM"
+              else
+                {
+                  echo "## Echec de creation de PR (GraphQL)"
+                  echo '```'
+                  cat gh-create.err
+                  echo '```'
+                  echo "## Echec du canal REST"
+                  echo '```'
+                  cat gh-create-rest.err
+                  echo '```'
+                } >> "$GITHUB_STEP_SUMMARY"
+                {
+                  echo "# Diagnostic branch-pr $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+                  echo
+                  echo "## gh pr create (GraphQL)"
+                  echo '```'
+                  cat gh-create.err
+                  echo '```'
+                  echo "## gh api REST"
+                  echo '```'
+                  cat gh-create-rest.err
+                  echo '```'
+                } > DIAGNOSTIC_PR.md
+                git config user.name "GLM 5.3 Flash [bot]"
+                git config user.email "glm53@local"
+                git add DIAGNOSTIC_PR.md
+                git commit -m "[ci-noop] diagnostic echec creation PR"
+                git push origin "$BRANCH"
+                echo "Diagnostic commite sur $BRANCH (DIAGNOSTIC_PR.md)." >&2
+                exit 1
+              fi
             fi
           fi
-          echo "number=$NUM" >> "$GITHUB_OUTPUT"
+          VIEW=$(gh pr view "$NUM" --json baseRefName,headRefOid)
+          VBASE=$(printf '%s' "$VIEW" | python3 -c 'import json,sys; print(json.load(sys.stdin)["baseRefName"])')
+          if [ "$VBASE" != "main" ]; then
+            echo "REFUS : PR #$NUM cible '$VBASE' au lieu de main." >&2
+            exit 1
+          fi
+          echo "PR ciblee : #$NUM (base verifiee : main)"
+          echo "PR_NUM=$NUM" >> "$GITHUB_ENV"
 
-      - name: Resoudre le numero de PR
-        id: pr
-        run: |
-          set -euo pipefail
-          EX="${{ steps.find.outputs.existing }}"
-          CR="${{ steps.create.outputs.number }}"
-          echo "number=${CR:-$EX}" >> "$GITHUB_OUTPUT"
-          echo "PR ciblee : #${CR:-$EX}"
-
-      - name: Attendre les checks externes (hors ce workflow)
+      - name: Attendre les checks puis fusionner (fail-closed, anti-course)
         env:
           GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           HEAD_SHA=$(git rev-parse HEAD)
-          DEADLINE=$((SECONDS + 300))
-          sleep 45   # stabilisation : laisse les checks tardifs s'enregistrer
+          echo "SHA pousse (validé par pr-tests + checks externes) : $HEAD_SHA"
+          DEADLINE=$((SECONDS + WAIT_CHECKS_SECONDS))
+          sleep "$STABILIZE_SECONDS"
           while [ "$SECONDS" -lt "$DEADLINE" ]; do
             OUT=$(gh api -H "Accept: application/vnd.github+json" \
-                  "repos/$REPO/commits/$HEAD_SHA/check-runs" \
-                  --jq '.check_runs[] | select(.name != "open-pr") | .name + "=" + (.conclusion // "pending")' || true)
-            FAIL=$(echo "$OUT" | grep -cE '=(failure|timed_out|startup_failure|action_required)$' || true)
-            PEND=$(echo "$OUT" | grep -cE '=pending$' || true)
+                  "repos/$REPO/commits/$HEAD_SHA/check-runs?per_page=100" \
+                  | python3 -c 'import json,sys; [print(r["name"]+"="+(r.get("conclusion") or "pending")) for r in json.load(sys.stdin).get("check_runs", []) if r.get("name") != "open-pr"]' \
+                  || true)
+            FAIL=$(printf '%s\n' "$OUT" | grep -cE '=(failure|timed_out|startup_failure|action_required)$' || true)
+            PEND=$(printf '%s\n' "$OUT" | grep -cE '=pending$' || true)
+            TOTAL=$(printf '%s\n' "$OUT" | grep -c '=' || true)
             if [ "${FAIL:-0}" -gt 0 ]; then
-              echo "ECHEC DE CHECK — merge refuse (fail-closed) :" >&2
-              echo "$OUT" >&2
+              echo "ECHEC DE CHECK — merge refusé (fail-closed) :" >&2
+              printf '%s\n' "$OUT" >&2
+              exit 1
+            fi
+            if [ "${TOTAL:-0}" -eq 0 ]; then
+              echo "REFUS : aucun check n'a couru sur ce head (0 check n'est pas une validation)." >&2
               exit 1
             fi
             if [ "${PEND:-0}" -eq 0 ]; then
-              echo "Aucun check externe en attente. Checks observes :"
-              echo "${OUT:-<aucun>}"
-              exit 0
+              echo "Tous les checks sont conclus (aucun en attente) :"
+              printf '%s\n' "$OUT"
+              break
             fi
             echo "En attente : $PEND check(s)..."
             sleep 20
           done
-          echo "Timeout d'attente — merge refuse par prudence." >&2
-          exit 1
-
-      - name: Fusionner puis supprimer la branche
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          NUM="${{ steps.pr.outputs.number }}"
-          gh pr merge "$NUM" --merge
-          echo "PR #$NUM fusionnee (no-ff)."
+          if [ "${PEND:-0}" -gt 0 ]; then
+            echo "TIMEOUT d'attente des checks — merge refusé par prudence." >&2
+            exit 1
+          fi
+          VIEW=$(gh pr view "$PR_NUM" --json baseRefName,headRefOid)
+          VBASE=$(printf '%s' "$VIEW" | python3 -c 'import json,sys; print(json.load(sys.stdin)["baseRefName"])')
+          VHEAD=$(printf '%s' "$VIEW" | python3 -c 'import json,sys; print(json.load(sys.stdin)["headRefOid"])')
+          if [ "$VBASE" != "main" ]; then
+            echo "STOP : PR #$PR_NUM cible '$VBASE' (main requis) — pas de merge." >&2
+            exit 1
+          fi
+          if [ "$VHEAD" != "$HEAD_SHA" ]; then
+            echo "STOP : head de la PR ($VHEAD) != SHA validé ($HEAD_SHA)." >&2
+            echo "Un push est intervenu pendant l'attente — relancer la validation sur le nouveau SHA." >&2
+            exit 1
+          fi
+          gh pr merge "$PR_NUM" --merge
+          echo "PR #$PR_NUM fusionnée (no-ff)."
           git push origin --delete "$BRANCH"
-          echo "Branche $BRANCH supprimee sur origin."
+          echo "Branche $BRANCH supprimée sur origin."
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            echo "ECHEC : la branche $BRANCH existe toujours sur origin." >&2
+            exit 1
+          fi
+          OPEN=$(gh pr list --head "$BRANCH" --state open \
+                 | python3 -c 'import sys; lines=[l for l in sys.stdin if l.strip()]; print(len(lines))')
+          if [ "$OPEN" != "0" ]; then
+            echo "ECHEC : $OPEN PR ouverte(s) résiduelle(s) pour $BRANCH." >&2
+            exit 1
+          fi
+          echo "Aucune PR ouverte résiduelle pour $BRANCH."
           echo "=== Branches distantes restantes :"
           git ls-remote --heads origin

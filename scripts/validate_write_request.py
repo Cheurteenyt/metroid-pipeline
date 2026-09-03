@@ -33,11 +33,16 @@ MODEL_PREFIX = {
     "GLM 5.2": "[GLM-5.2]",
     "GLM 5.3 Flash": "[GLM-5.3-Flash]",
 }
+# Canonical branch slugs (mission GPT 5.6 « FINAL HARDENING » §3 —
+# main-only, PR obligatoire, tous les modèles). The derived branch
+# automation/<slug>/<request-id> MUST match the branch-pr.yml allowlist
+# (automation/{gpt-5-6|qwen-3-8-max|glm-5-2|glm-5-3-flash}/*) so that PASS
+# branches enter the shared PR -> checks -> merge -> delete cycle.
 MODEL_SLUG = {
-    "GPT 5.6": "gpt-5.6",
-    "qwen3.8-max": "qwen3.8-max",
-    "GLM 5.2": "glm-5.2",
-    "GLM 5.3 Flash": "glm-5.3-flash",
+    "GPT 5.6": "gpt-5-6",
+    "qwen3.8-max": "qwen-3-8-max",
+    "GLM 5.2": "glm-5-2",
+    "GLM 5.3 Flash": "glm-5-3-flash",
 }
 
 OPERATIONS = ("patch", "create", "delete")
