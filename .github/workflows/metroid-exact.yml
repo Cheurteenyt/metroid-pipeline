@@ -12,137 +12,152 @@ permissions:
 jobs:
   exact:
     runs-on: ubuntu-latest
-    
+
     steps:
+      - name: Initialize fail-safe defaults
+        run: |
+          echo "PROCEED=false" >> $GITHUB_ENV
+          echo "COMPILE_SUCCESS=false" >> $GITHUB_ENV
+          echo "COMPILE_STATUS=NOT_RUN" >> $GITHUB_ENV
+          echo "REQUEST_ID=unknown" >> $GITHUB_ENV
+          echo "SOURCE_SHA=unknown" >> $GITHUB_ENV
+          echo "CANDIDATE_PATH=unknown" >> $GITHUB_ENV
+          echo "REQUEST_FILE=" >> $GITHUB_ENV
+          echo "METRIC_INSTRUCTIONS=0" >> $GITHUB_ENV
+          echo "METRIC_BRANCHES=0" >> $GITHUB_ENV
+
       - name: Checkout pipeline repo
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      
+
       - name: Parse request
         id: parse
         run: |
           echo "=== Parsing request ==="
-          
-          # Trouver le fichier de requête le plus récent
+
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "Manual trigger - using default test"
             echo "REQUEST_ID=exact-test" >> $GITHUB_ENV
             echo "SOURCE_SHA=main" >> $GITHUB_ENV
             echo "CANDIDATE_PATH=switch/src/CTransform4f.cpp" >> $GITHUB_ENV
+            echo "PROCEED=true" >> $GITHUB_ENV
           else
-            # Trouver le dernier fichier ajouté dans requests/exact/
-            # Use exact push range (not historical discovery)
+            # Event-scoped discovery: only request files added/modified by this
+            # exact push, never historical discovery.
             BEFORE="${{ github.event.before }}"
             AFTER="${{ github.sha }}"
-            
+
             if [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
-              # First push, use all commits
               CHANGED_FILES=$(git diff --name-only --diff-filter=AM HEAD~1 HEAD -- 'requests/exact/*.json' 2>/dev/null || echo "")
             else
-              # Use exact range
               CHANGED_FILES=$(git diff --name-only --diff-filter=AM $BEFORE $AFTER -- 'requests/exact/*.json' 2>/dev/null || echo "")
             fi
-            
-            # Count changed files (robust version)
+
             if [ -z "$CHANGED_FILES" ]; then
               FILE_COUNT=0
             else
               FILE_COUNT=$(echo "$CHANGED_FILES" | grep -c '\.json$' 2>/dev/null || echo "0")
               FILE_COUNT=$(echo "$FILE_COUNT" | tr -d '\n' | tr -d ' ' | head -1)
             fi
-            
+
             if [ "$FILE_COUNT" -eq 0 ]; then
-              echo "No exact requests found in this push"
-              exit 1
-            elif [ "$FILE_COUNT" -gt 1 ]; then
+              # Delete-only push under requests/exact/ (e.g. cleanup): an empty
+              # queue is a no-op, not a verification failure. Fail-closed applies
+              # to verification results, not to "nothing to do".
+              echo "No new exact request in this push - skipping (no-op)"
+              exit 0
+            fi
+
+            if [ "$FILE_COUNT" -gt 1 ]; then
               echo "ERROR: Multiple exact requests in single push (found $FILE_COUNT)"
               exit 1
             fi
-            
+
             LATEST_FILE=$(echo "$CHANGED_FILES" | head -1)
-            if [ -z "$LATEST_FILE" ]; then
-              echo "No new request file found"
-              exit 1
-            fi
-            
             echo "Request file: $LATEST_FILE"
-            
-            # Parser le JSON
+
             REQUEST_ID=$(jq -r '.request_id' "$LATEST_FILE")
             SOURCE_SHA=$(jq -r '.source_sha' "$LATEST_FILE")
             CANDIDATE_PATH=$(jq -r '.candidate_path' "$LATEST_FILE")
-            
+
             echo "REQUEST_ID=$REQUEST_ID" >> $GITHUB_ENV
             echo "SOURCE_SHA=$SOURCE_SHA" >> $GITHUB_ENV
             echo "CANDIDATE_PATH=$CANDIDATE_PATH" >> $GITHUB_ENV
             echo "REQUEST_FILE=$LATEST_FILE" >> $GITHUB_ENV
+            echo "PROCEED=true" >> $GITHUB_ENV
           fi
-          
+
           echo "Parsed:"
           echo "  Request ID: $REQUEST_ID"
           echo "  Source SHA: $SOURCE_SHA"
           echo "  Candidate Path: $CANDIDATE_PATH"
-      
+
       - name: Checkout GitLab repo
+        if: env.PROCEED == 'true'
         run: |
           echo "=== Checking out GitLab repo at SHA $SOURCE_SHA ==="
           git clone https://oauth2:${{ secrets.GITLAB_TOKEN }}@gitlab.com/cheurteen/metroid.git /tmp/metroid
           cd /tmp/metroid
-          
+
           if [ "$SOURCE_SHA" != "main" ]; then
             git checkout $SOURCE_SHA
           fi
-          
+
           echo "Checked out commit:"
           git log -1 --oneline
-      
+
       - name: Install LLVM 17 and dependencies
+        if: env.PROCEED == 'true'
         run: |
           echo "=== Installing LLVM 17 and AArch64 toolchain ==="
-          
-          # Installer LLVM 17
-          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
-          sudo add-apt-repository "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-17 main"
+
+          # Runner images move on (ubuntu-latest is now 24.04, where apt-key no
+          # longer exists). Derive the codename and use a signed keyring.
+          . /etc/os-release
+          CODENAME="${VERSION_CODENAME}"
+          echo "Detected distro: ${CODENAME}"
+
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor --yes -o /usr/share/keyrings/llvm-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm-archive-keyring.gpg] http://apt.llvm.org/${CODENAME}/ llvm-toolchain-${CODENAME}-17 main" | sudo tee /etc/apt/sources.list.d/llvm17.list
           sudo apt-get update
           sudo apt-get install -y llvm-17 clang-17 lld-17 llvm-17-tools
-          
-          # Installer la toolchain AArch64
+
+          # Install the AArch64 toolchain
           sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu binutils-aarch64-linux-gnu
-          
-          # Installer les dépendances Python
-          pip install capstone pyelftools
-          
-          # Vérifier les installations
+
+          # Install the Python dependencies (PEP 668: externally managed env on 24.04)
+          pip install --break-system-packages capstone pyelftools
+
+          # Verify the installations
           echo "LLVM version:"
           clang++-17 --version
           echo "AArch64 toolchain:"
           aarch64-linux-gnu-gcc --version
           echo "Capstone:"
           python3 -c "import capstone; print(capstone.__version__)"
-      
+
       - name: Compile candidate
         id: compile
+        if: env.PROCEED == 'true'
         run: |
           echo "=== Compiling candidate: $CANDIDATE_PATH ==="
-          cd /tmp/metroid
-          
-          # Créer le répertoire de preuve
           mkdir -p $GITHUB_WORKSPACE/proof
           cd $GITHUB_WORKSPACE/proof
-          
-          # Vérifier que le fichier existe
+
           if [ ! -f "/tmp/metroid/$CANDIDATE_PATH" ]; then
             echo "❌ Candidate file not found: $CANDIDATE_PATH"
             echo "COMPILE_SUCCESS=false" >> $GITHUB_ENV
-            exit 1
+            echo "COMPILE_STATUS=CANDIDATE_MISSING" >> $GITHUB_ENV
+            # No early exit: a FAIL proof is generated below and the job goes
+            # red (fail-closed).
+            exit 0
           fi
-          
+
           echo "✅ Candidate file found: $CANDIDATE_PATH"
-          
-          # Compiler avec les flags AArch64
+
           echo "Compiling with AArch64 toolchain..."
-          clang++-17 -c \
+          if clang++-17 -c \
             -target aarch64-linux-gnu \
             -O2 \
             -Xclang -mframe-pointer=non-leaf \
@@ -154,19 +169,16 @@ jobs:
             -w \
             -I /tmp/metroid/switch/include \
             -I /tmp/metroid/switch/src \
-            /tmp/metroid/$CANDIDATE_PATH \
-            -o candidate.o 2> compile_errors.txt
-          
-          if [ $? -eq 0 ]; then
+            "/tmp/metroid/$CANDIDATE_PATH" \
+            -o candidate.o 2> compile_errors.txt; then
             echo "✅ Compilation successful"
             echo "COMPILE_SUCCESS=true" >> $GITHUB_ENV
             echo "COMPILE_STATUS=COMPILED" >> $GITHUB_ENV
-            
-            # Analyser l'objet compilé
+
             echo "Analyzing compiled object..."
             llvm-nm-17 candidate.o > symbols.txt 2>&1
             llvm-objdump-17 -d candidate.o > disassembly.txt 2>&1
-            
+
             echo "Generated:"
             echo "  - candidate.o"
             echo "  - symbols.txt"
@@ -177,38 +189,37 @@ jobs:
             echo "COMPILE_STATUS=FAILED" >> $GITHUB_ENV
             cat compile_errors.txt
           fi
-      
+
       - name: Analyze structure
-        if: env.COMPILE_SUCCESS == 'true'
+        if: env.PROCEED == 'true' && env.COMPILE_SUCCESS == 'true'
         run: |
           echo "=== Analyzing compiled structure ==="
           cd $GITHUB_WORKSPACE/proof
-          
-          # Analyser les symboles
+
           echo "Symbols found:"
           wc -l symbols.txt
-          
-          # Analyser le désassemblage
-          echo "Instructions:"
+
+          echo "Disassembly:"
           wc -l disassembly.txt
-          
-          # Extraire des métriques simples
+
           INSTRUCTION_COUNT=$(grep -c "^[[:space:]]*[0-9a-f]" disassembly.txt || echo "0")
           BRANCH_COUNT=$(grep -E "\b(b|bl|cbz|cbnz|tbz|tbnz)\b" disassembly.txt | wc -l || echo "0")
-          
+
           echo "METRIC_INSTRUCTIONS=$INSTRUCTION_COUNT" >> $GITHUB_ENV
           echo "METRIC_BRANCHES=$BRANCH_COUNT" >> $GITHUB_ENV
-          
+
           echo "Analysis complete:"
           echo "  Instructions: $INSTRUCTION_COUNT"
           echo "  Branches: $BRANCH_COUNT"
-      
+
       - name: Generate proof
+        if: env.PROCEED == 'true'
         run: |
           echo "=== Generating proof ==="
           cd $GITHUB_WORKSPACE/proof
-          
-          # Créer le JSON de preuve
+
+          # Valid JSON even on failure; a FAIL proof must never yield a green
+          # job, and a red job must always carry its proof.
           cat > run.json <<EOF
           {
             "request_id": "$REQUEST_ID",
@@ -217,6 +228,7 @@ jobs:
             "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
             "compile_status": "$COMPILE_STATUS",
             "compile_success": $COMPILE_SUCCESS,
+            "result": "$([ "$COMPILE_SUCCESS" = "true" ] && echo COMPILED || echo FAIL)",
             "metrics": {
               "instructions": ${METRIC_INSTRUCTIONS:-0},
               "branches": ${METRIC_BRANCHES:-0}
@@ -225,34 +237,48 @@ jobs:
             "notes": "Phase A: compilation and structure analysis only. Full EXACT verification requires main.elf."
           }
           EOF
-          
+
           echo "Proof generated: run.json"
           cat run.json
-      
+
       - name: Upload artifacts
+        if: env.PROCEED == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: proof-${{ env.REQUEST_ID }}
           path: proof/
           retention-days: 90
-      
-      - name: Move request to completed
-        if: env.REQUEST_FILE != ''
+
+      - name: Archive request
+        if: env.PROCEED == 'true' && env.REQUEST_FILE != ''
         run: |
-          echo "=== Moving request to completed ==="
-          
-          # Créer le répertoire completed/exact si nécessaire
-          mkdir -p requests/completed/exact
-          
-          # Déplacer le fichier
-          if [ -f "$REQUEST_FILE" ]; then
-            mv "$REQUEST_FILE" requests/completed/exact/
-            echo "Moved $REQUEST_FILE to requests/completed/exact/"
+          echo "=== Archiving request ==="
+
+          if [ "$COMPILE_SUCCESS" = "true" ]; then
+            DEST="requests/completed/exact"
+            OUTCOME="completed"
+          else
+            DEST="requests/failed/exact"
+            OUTCOME="failed"
           fi
-          
-          # Commit le déplacement
+
+          mkdir -p "$DEST"
+          if [ -f "$REQUEST_FILE" ]; then
+            mv "$REQUEST_FILE" "$DEST/"
+            echo "Moved $REQUEST_FILE to $DEST/"
+          fi
+
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
           git add requests/
-          git commit -m "chore: move $REQUEST_ID to completed" || echo "No changes to commit"
+          git commit -m "[bot] exact-relay: move $REQUEST_ID to $OUTCOME" || echo "No changes to commit"
           git push || echo "Push failed (may require manual intervention)"
+
+      - name: Enforce fail-closed result
+        if: env.PROCEED == 'true'
+        run: |
+          if [ "$COMPILE_SUCCESS" != "true" ]; then
+            echo "##[error]Exact verification FAILED: COMPILE_STATUS=$COMPILE_STATUS (fail-closed: a FAIL proof never yields a green job)"
+            exit 1
+          fi
+          echo "✅ Exact verification completed (Phase A: compile + structure)"
