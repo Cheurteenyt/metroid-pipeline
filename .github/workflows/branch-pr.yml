@@ -1,0 +1,136 @@
+name: Branch PR Automation (GLM 5.3 Flash)
+
+# Politique de branches (docs/BRANCH_POLICY.md) :
+#   une tache = une branche temporaire automation/glm-5.3-flash/<task-id>
+#   -> PR automatique -> merge apres checks -> suppression de la branche.
+# Fail-closed : si un check echoue, PAS de merge (PR laissee ouverte).
+# Ce workflow ne modifie aucun script-porte du write relay.
+
+on:
+  push:
+    branches-ignore:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+  actions: read
+
+concurrency:
+  group: branch-pr-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  open-pr:
+    if: startsWith(github.ref_name, 'automation/glm-5.3-flash/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      BRANCH: ${{ github.ref_name }}
+    steps:
+      - name: Checkout complet
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Garde-fous
+        run: |
+          set -euo pipefail
+          if [ "$BRANCH" = "main" ]; then
+            echo "REFUS : main n'est jamais une branche de travail." >&2
+            exit 1
+          fi
+          case "$BRANCH" in
+            automation/glm-5.3-flash/*) ;;
+            *) echo "REFUS : namespace non autorise ($BRANCH)." >&2; exit 1 ;;
+          esac
+          git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null \
+            || { echo "REFUS : branche absente sur origin." >&2; exit 1; }
+          echo "Branche de travail : $BRANCH"
+
+      - name: Creer ou reutiliser la PR
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          EXISTING=$(gh pr list --head "$BRANCH" --base main --state open --json number --jq '.[0].number // ""')
+          if [ -n "$EXISTING" ]; then
+            echo "PR #$EXISTING deja ouverte — reutilisation."
+            echo "number=$EXISTING" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          SUBJECT=$(git log -1 --format=%s HEAD)
+          {
+            echo "## Resume"
+            echo
+            git log -1 --format=%b HEAD
+            echo
+            echo "## Fichiers touches"
+            echo '```'
+            git diff --name-status origin/main...HEAD
+            echo '```'
+            echo
+            echo "## Tests executes"
+            echo "- Validation locale avant push (revue du diff, syntaxe, aucun secret)."
+            echo "- Porte de fusion : checks CI de cette PR (fail-closed)."
+            echo
+            echo "## Impact sur les proofs"
+            echo "- Aucun changement des scripts-portes du relay ni du schema github-write-proof/v1."
+            echo
+            echo "## Provenance"
+            echo "- Auteur du modele : GLM 5.3 Flash"
+            echo "- Branche : \`$BRANCH\` -> base : \`main\`"
+            echo "- request_id relay : n/a (travail de maintenance hors relay)"
+            echo "- Methode de fusion : merge no-ff ; branche supprimee apres fusion."
+          } > pr-body.md
+          URL=$(gh pr create --base main --head "$BRANCH" --title "$SUBJECT" --body-file pr-body.md)
+          NUM="${URL##*/}"
+          echo "PR creee : $URL"
+          echo "number=$NUM" >> "$GITHUB_OUTPUT"
+
+      - name: Attendre les checks externes (hors ce workflow)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          HEAD_SHA=$(git rev-parse HEAD)
+          DEADLINE=$((SECONDS + 300))
+          sleep 45   # stabilisation : laisse les checks tardifs s'enregistrer
+          while [ "$SECONDS" -lt "$DEADLINE" ]; do
+            OUT=$(gh api -H "Accept: application/vnd.github+json" \
+                  "repos/$REPO/commits/$HEAD_SHA/check-runs" \
+                  --jq '.check_runs[] | select(.name != "open-pr") | .name + "=" + (.conclusion // "pending")' || true)
+            FAIL=$(echo "$OUT" | grep -cE '=(failure|timed_out|startup_failure|action_required)$' || true)
+            PEND=$(echo "$OUT" | grep -cE '=pending$' || true)
+            if [ "${FAIL:-0}" -gt 0 ]; then
+              echo "ECHEC DE CHECK — merge refuse (fail-closed) :" >&2
+              echo "$OUT" >&2
+              exit 1
+            fi
+            if [ "${PEND:-0}" -eq 0 ]; then
+              echo "Aucun check externe en attente. Checks observes :"
+              echo "${OUT:-<aucun>}"
+              exit 0
+            fi
+            echo "En attente : $PEND check(s)..."
+            sleep 20
+          done
+          echo "Timeout d'attente — merge refuse par prudence." >&2
+          exit 1
+
+      - name: Fusionner puis supprimer la branche
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          NUM="${{ steps.pr.outputs.number }}"
+          gh pr merge "$NUM" --merge
+          echo "PR #$NUM fusionnee (no-ff)."
+          git push origin --delete "$BRANCH"
+          echo "Branche $BRANCH supprimee sur origin."
+          echo "=== Branches distantes restantes :"
+          git ls-remote --heads origin
